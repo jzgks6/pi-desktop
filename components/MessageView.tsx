@@ -360,6 +360,9 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
       {imageBlocks.map((img, i) => {
         // lib/types.ts ImageContent uses {source:{type,data,media_type,url}}
         // pi-ai on-disk format uses flat {data, mimeType} — handle both
+        // SAFETY: `img` may also be the legacy flat pi-ai shape, which is not part of
+        // the declared ImageContent type, so a widening assertion is required. Both
+        // fields stay optional and are re-checked before any use further down.
         const flat = img as unknown as { data?: string; mimeType?: string };
         const src = img.source
           ? img.source.type === "base64"
@@ -1789,6 +1792,9 @@ function getMessageImages(content: CustomMessage["content"] | UserMessage["conte
 }
 
 function imageSource(img: ImageContent): string {
+  // SAFETY: same reason as the render path above — `img` may also carry pi-ai's
+  // legacy flat {data, mimeType} shape, which the declared type does not describe.
+  // Only optional fields are read, and they are re-checked before use.
   const flat = img as unknown as { data?: string; mimeType?: string };
   if (img.source) {
     return img.source.type === "base64"

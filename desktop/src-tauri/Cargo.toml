@@ -1,0 +1,21 @@
+[package]
+name = "pi-web-desktop"
+version = "0.9.3"
+description = "Pi Web 桌面外壳：启动内置的 Node 服务，再用系统 WebView 显示它"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+# 只为 macOS 打包；不引 shell 插件 —— 拉起 node 用 std::process::Command 就够，
+# 少一个依赖就少一层 capabilities 配置。
+[profile.release]
+# 打包体积优先（首版不追求编译速度）
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

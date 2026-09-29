@@ -18,7 +18,7 @@ test("confines extension overlays to the content region above the composer", () 
   assert.match(customSource, /position: "absolute"[\s\S]*?inset: 0/);
   assert.match(customSource, /pointerEvents: "none"/);
   assert.doesNotMatch(source, /z-\[100\]|zIndex: 100/);
-  assert.match(customSource, /maxHeight: "min\(760px, 100%\)"/);
+  assert.match(customSource, /maxHeight: "min\(880px, 100%\)"/);
 });
 
 test("adds collapse without replacing cancel", () => {
@@ -38,7 +38,12 @@ test("renders extension confirmation and options as markdown", () => {
 test("preserves title newlines like pi's TUI and keeps long titles from hiding the body", () => {
   const header = dialogSource.slice(dialogSource.indexOf('role="dialog"'), dialogSource.indexOf("{request.method === \"confirm\""));
   assert.match(header, /whiteSpace: "pre-wrap", overflowWrap: "anywhere" \}\}>\{request\.title\}/);
-  assert.match(header, /maxHeight: "50%", overflowY: "auto" \}\}>[\s\S]*?\{request\.title\}/);
+  // 标题区必须是「可收缩 + vh 硬上限」。
+  // 曾经是 flexShrink: 0 + maxHeight: "50%" —— 百分比 max-height 在父容器高度
+  // 由内容撑开时按规范会被当成 none，于是长标题撑满整块、把下面的选项挤出去，
+  // 再被 dialog 的 overflow:hidden 裁掉。这条断言就是为了盯住这个回归。
+  assert.match(header, /flex: "0 1 auto", minHeight: 0[\s\S]*?maxHeight: "40vh", overflowY: "auto" \}\}>[\s\S]*?\{request\.title\}/);
+  assert.doesNotMatch(header, /maxHeight: "50%", overflowY: "auto"/);
 });
 
 test("resets collapse state when a new extension request arrives", () => {

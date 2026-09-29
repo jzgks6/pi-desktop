@@ -50,7 +50,8 @@ test("persists and exposes a vertical session/explorer resize handle", () => {
   assert.match(globalStyles, /\.sidebar-section-resize-handle:focus-visible::after/);
   assert.doesNotMatch(globalStyles, /\.sidebar-section-resize-handle:focus-visible \{[^}]*outline: 2px solid var\(--accent\)/);
   assert.match(globalStyles, /\.sidebar-section-resize-handle::after[\s\S]*?background: transparent/);
-  assert.match(source, /borderTop: "1px solid var\(--border\)"/);
+  // 原来这里断言的是「两个面板之间的 borderTop」—— 现在同一时间只显示一个面板，
+  // 那条分界线已交给 CSS（native-theme.css 里对文件视图把 border-top 清成 0）。
   assert.match(source, /var\(--sidebar-session-pane-height, 320px\)/);
   assert.match(source, /minHeight: explorerOpen \? EXPLORER_PANE_MIN_HEIGHT : 0/);
 });
@@ -139,7 +140,11 @@ test("lifecycle refreshes bypass the cache while cross-window polling reuses it"
 
 test("does not expose disk-backed actions for transient sessions", () => {
   assert.match(sessionItemSource, /if \(session\.transient\) return;/);
-  assert.match(sessionItemSource, /\{hovered && !session\.transient && \(/);
+  // 行操作收进了 ⋯ 菜单，触发器由 !session.transient 守着
+  assert.match(
+sessionItemSource,
+/\{!session\.transient && \(\s*<button[\s\S]*?className="session-row-menu-trigger"/,
+  );
 });
 
 test("hides subagent rows and aggregates their state into the main session row", () => {

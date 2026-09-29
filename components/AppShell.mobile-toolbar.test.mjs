@@ -31,17 +31,17 @@ test("only renders the Agents switcher when the active session family has subage
 });
 
 test("keeps the Agents panel open while switching sessions and positions it at the left", () => {
-  assert.match(source, /const AGENT_PANEL_WIDTH = 420/);
+  // 面板几何现在按「中间列矩形 + 面板边界」算，不再有固定的 AGENT_PANEL_WIDTH
+  assert.match(source, /panelBounds\.height/);
   assert.match(
     source,
-    /if \(activeTopPanel === "agents"\)[\s\S]*?left: topBarRect\.left[\s\S]*?width: Math\.min\(AGENT_PANEL_WIDTH, topBarRect\.width\)/,
+    /activeTopPanel === "agents"[\s\S]*?<AgentSessionPanel[\s\S]*?onSelectSession=\{handleSelectSession\}/,
   );
-  assert.match(source, /<AgentSessionPanel[\s\S]*?onSelectSession=\{handleSelectSession\}/);
 });
 
 test("only renders branch toolbar controls for sessions with branches", () => {
   assert.match(source, /const sessionHasBranches = hasSessionBranches\(branchTree\)/);
-  assert.match(source, /\{sessionHasBranches && \(mobile \? \(/);
+  assert.match(source, /\{sessionHasBranches && mobile && \(/);
   assert.match(source, /\{isMobile && sessionHasBranches && \(/);
   assert.match(source, /panel === "branches" \? null : panel/);
 });

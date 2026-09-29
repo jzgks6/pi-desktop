@@ -93,6 +93,9 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  /** 输入框下方控制条「中间」槽位的插槽。上游注释写的就是 left | center (context) | right，
+   *  但中间一直只是个空 spacer；现在用来放上下文统计。 */
+  contextSlot?: React.ReactNode;
 }
 
 export interface ChatInputHandle {
@@ -415,6 +418,9 @@ export function getUserMessageDraftImages(message: UserMessage): ChatDraftImage[
     if (block.type !== "image") return [];
 
     // Support both the current nested image format and older flat pi-ai entries.
+    // SAFETY: `block` may also be the legacy flat pi-ai shape, which is not part of
+    // the union type, so a narrowing assertion is required. Both fields stay optional
+    // and are re-checked with `typeof` immediately below before any use.
     const flat = block as unknown as { data?: unknown; mimeType?: unknown };
     const data = block.source?.type === "base64" ? block.source.data : flat.data;
     const mimeType = block.source?.type === "base64" ? block.source.media_type : flat.mimeType;
@@ -571,6 +577,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
+  contextSlot,
   compact = false,
 }: Props, ref) {
   const { t } = useI18n();
@@ -1614,7 +1621,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         border: 0,
         background: "transparent",
         padding: compact ? 0 : "0 16px 8px",
-        paddingRight: compact ? 0 : isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
+        paddingRight: compact ? 0 : 16,
         opacity: builtinCommandPending ? 0.5 : 1,
         transition: "opacity 0.15s",
       }}
@@ -2351,8 +2358,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             )}
           </div>
 
-          {/* spacer */}
-          {!isMobile && <div style={{ flex: 1 }} />}
+          {/* CENTER: 上下文统计。
+              上游注释是 “left | center (context) | right”，但中间一直只是个空 spacer。
+              这里把它变成真正的居中槽：flex:1 + justify-content:center，
+              于是「到左侧模型选择器」和「到右侧思维力度」的距离相等。 */}
+          {!isMobile && (
+            <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 2 }}>
+              {contextSlot}
+            </div>
+          )}
 
           {/* RIGHT: thinking + tools preset + compact + sound (idle) | Stop + sound (streaming) */}
           <div ref={controlsMenuRef} style={{

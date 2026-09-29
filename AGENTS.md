@@ -1,5 +1,12 @@
 # Pi Web - Development Notes
 
+> **This repo is a fork.** It reworks the UI into an IDE-style three-column layout and adds a
+> macOS desktop shell. `FORK.md` lists every change against upstream (`agegr/pi-web` @ `96966e5`)
+> and how to port them onto a newer upstream. Two rules from it matter for any edit:
+> `app/globals.css` / `app/settings.css` stay byte-identical to upstream (fork styles go in
+> `app/native-theme.css`), and component edits add a `className` while deleting the inline
+> style it replaces.
+
 ## Quick Start
 
 ```bash
@@ -125,7 +132,6 @@ components/
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
   BranchNavigator.tsx in-session branch switcher
-  ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for editing models.json (opened from sidebar bottom)
   EnabledModelsSection.tsx  model switches inside ModelsConfig, backed by enabledModels
@@ -144,6 +150,42 @@ hooks/
   useIsMobile.ts      responsive breakpoint hook
   useTheme.ts         theme state
 ```
+
+---
+
+## Desktop app (macOS)
+
+The repo is also the source of a standalone macOS app. Nothing in `app/`, `components/`
+or `lib/` is desktop-specific — the shell launches the same Next server and points a
+webview at it.
+
+```text
+desktop/
+  dist/index.html            loading page shown until the server answers (Tauri frontendDist)
+  src-tauri/
+    src/main.rs              shell: pick port → spawn node → navigate → clean up
+    tauri.conf.json          productName "pi desktop"; bundle.resources = runtime/
+    Cargo.toml               tauri only (no shell plugin — std::process is enough)
+    runtime/                 assembled at package time (gitignored, ~670M)
+    target/ gen/ icons/      cargo output / generated (gitignored)
+scripts/package-desktop.mjs  assemble runtime/ then run `cargo tauri build`
+```
+
+```bash
+node scripts/package-desktop.mjs --verify       # build → assemble → bundle → launch check
+node scripts/package-desktop.mjs --skip-build   # reuse the existing .next
+```
+
+Flags: `--skip-build`, `--reuse-runtime`, `--assemble-only`, `--skip-tauri`, `--verify`,
+`--bundles=<app|dmg>`, `--force-icons`, `--debug`, plus `PI_DESKTOP_NODE=<path>` to pick
+the node binary that gets bundled.
+
+Two guards, both added after real failures:
+
+* assembling the runtime is never skipped as a side effect of another flag — it is
+  opt-in via `--reuse-runtime` (a stale runtime once shipped a component that had already
+  been deleted from the source), and
+* the runtime's `.next/BUILD_ID` must equal the repo's, otherwise packaging aborts.
 
 ---
 

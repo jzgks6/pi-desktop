@@ -5,6 +5,9 @@ import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import "katex/dist/katex.min.css";
 import "./globals.css";
 import "./settings.css";
+// 本项目自有的样式层。必须在两个上游样式之后引入，才能稳定盖住它们。
+// 归属规则见文件头注释：globals.css / settings.css 保持与上游逐字节一致。
+import "./native-theme.css";
 
 const notoSansMono = Noto_Sans_Mono({
   subsets: ["latin", "cyrillic"],

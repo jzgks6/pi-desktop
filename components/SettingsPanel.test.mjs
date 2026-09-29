@@ -15,11 +15,10 @@ const loginSource = await readFile(new URL("../app/login/page.tsx", import.meta.
 
 test("opens one settings panel from direct sidebar shortcuts", () => {
   assert.match(shellSource, /<SettingsPanel/);
-  assert.match(shellSource, /setSettingsSection\(section\)/);
+  // 入口从「左栏底部三个按钮」换成了左栏顶部的齿轮（见 SessionSidebar 的 sidebar-top-btn），
+  // 所以这里只断言 AppShell 侧仍然只有这一个设置面板入口。
+  assert.match(shellSource, /setSettingsSection\(/);
   assert.match(shellSource, /initialSection=\{settingsSection\}/);
-  assert.match(shellSource, /translate\("common\.settings"\)/);
-  assert.match(shellSource, /<SettingsSectionIcon section=\{section\} size=\{14\} strokeWidth=\{2\} \/>\s*<span>\{label\}<\/span>/);
-  assert.match(shellSource, /<SettingsSectionIcon section="general" size=\{14\} strokeWidth=\{2\} \/>/);
   assert.doesNotMatch(shellSource, /\["plugins", translate\("common\.plugins"\)\]/);
   assert.doesNotMatch(shellSource, /setModelsConfigOpen|setSkillsConfigOpen|setAgentsConfigOpen|setPluginsConfigOpen/);
 });

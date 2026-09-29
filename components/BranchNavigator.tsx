@@ -293,8 +293,12 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   const topLevel = selectTopLevelBranches(tree);
   const hasContent = !noBranchReason && topLevel.length > 0;
 
+  // 图标颜色跟随「是否展开」，不再跟随「是否有分支内容」。
+  // 上游是 hasContent 就染 accent（当作「这里有分支」的提示），但在顶栏上会变成
+  // 平时就是蓝的，跟旁边灰色的 ⋯ 不一致。而且这个按钮本来就只在有分支的会话里
+  // 才渲染，「有没有分支」不需要再用颜色提示。
   const branchIcon = (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: hasContent ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: open ? "var(--accent)" : "var(--text-muted)", flexShrink: 0 }}>
       <line x1="6" y1="3" x2="6" y2="15" />
       <circle cx="18" cy="6" r="3" />
       <circle cx="6" cy="18" r="3" />
@@ -351,7 +355,11 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
             zIndex: 500,
           }}>
             {hasContent ? (
-              <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
+              /* 高度上限：520px 与「不超过下拉下方可用空间」取小。
+                 原来是写死 260px（分支多的会话只能看到很短一段），
+                 中途改成过「铺满整个可用空间」（约 585px）又太高，
+                 然后收到 420px，现在按反馈再放到 520px。 */
+              <div style={{ padding: "4px 12px 8px 12px", maxHeight: `min(520px, calc(100vh - ${dropdownPos.top + 12}px))`, overflowY: "auto" }}>
                 {topLevel.map((child, idx) => (
                   <TreeNodeView
                     key={child.entry.id}

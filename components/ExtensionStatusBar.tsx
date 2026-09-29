@@ -21,6 +21,31 @@ export function formatExtensionStatusLine(statuses: ExtensionStatusItem[]): stri
     .join(" ");
 }
 
+/**
+ * 扩展状态行。原本内嵌在 ExtensionStatusBar 里，这里抽出来单独导出，
+ * 好让它被安置到别的位置（现在放在顶栏那一行的左侧），
+ * 同时保证只有一份实现 —— ExtensionStatusBar 也改成用它。
+ */
+export function ExtensionStatusLine({ statuses }: { statuses: ExtensionStatusItem[] }) {
+  if (statuses.length === 0) return null;
+
+  const statusLine = formatExtensionStatusLine(statuses);
+  const plainStatusLine = stripAnsi(statusLine);
+
+  return (
+    <div
+      role="status"
+      className="extension-status-line"
+      aria-label={plainStatusLine}
+      title={plainStatusLine}
+    >
+      <span className="extension-status-text">
+        <AnsiText text={statusLine} />
+      </span>
+    </div>
+  );
+}
+
 export function ExtensionStatusBar({
   statuses,
   widgets = [],
@@ -30,26 +55,12 @@ export function ExtensionStatusBar({
 }) {
   if (statuses.length === 0 && widgets.length === 0) return null;
 
-  const statusLine = formatExtensionStatusLine(statuses);
-  const plainStatusLine = stripAnsi(statusLine);
-
   return (
     <div
       className={`extension-status-shelf${widgets.length > 0 ? " has-widgets" : ""}${statuses.length > 0 ? " has-status" : ""}`}
     >
       {widgets.length > 0 && <ExtensionWidgets widgets={widgets} />}
-      {statuses.length > 0 && (
-        <div
-          role="status"
-          className="extension-status-line"
-          aria-label={plainStatusLine}
-          title={plainStatusLine}
-        >
-          <span className="extension-status-text">
-            <AnsiText text={statusLine} />
-          </span>
-        </div>
-      )}
+      <ExtensionStatusLine statuses={statuses} />
     </div>
   );
 }

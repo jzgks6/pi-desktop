@@ -9,13 +9,14 @@ import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
-import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
+import { SettingsPanel } from "./SettingsPanel";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
 import { AgentSessionPanel } from "./AgentSessionPanel";
 import { TerminalPanel } from "./TerminalPanel";
+import { ExtensionStatusLine } from "./ExtensionStatusBar";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
@@ -54,7 +55,7 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
-import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { BlockingExtensionUiRequest, ExtensionStatusItem, SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -71,7 +72,14 @@ type AutoNameStatus =
   | { kind: "error"; message: string };
 
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
-const AGENT_PANEL_WIDTH = 420;
+
+/** macOS 红绿灯那一小片占的宽度。
+ *
+ *  桌面版的窗口没有标题栏：红绿灯直接叠在画面左上角（靠左栏顶部那一行左侧
+ *  留出来的空位，见 desktop/src-tauri/src/main.rs 的 overlay 标题栏）。
+ *  左栏收起后，中栏这行就顶到了窗口最左边，收起按钮会正好落在红绿灯底下，
+ *  所以这时要让开这一段。移动端没有窗口控件，不需要。 */
+const TRAFFIC_LIGHTS_WIDTH = 80;
 
 function parkedNewSessionDraftKey(cwd: string): string {
   return `parked-new:${cwd}`;
@@ -255,6 +263,20 @@ export function AppShell() {
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const [pendingQuotePrompt, setPendingQuotePrompt] = useState<{ sessionId: string; text: string } | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
+  /** 信息面板的容器。用于「点外面关闭」的命中判定。 */
+  const topPanelElRef = useRef<HTMLDivElement>(null);
+  /** 中间列。面板要盖住的是它，不是整个视口。 */
+  const centerColRef = useRef<HTMLDivElement>(null);
+  /** 扩展状态（ChatWindow 上报）。顶栏那一行兼作状态栏，左侧显示它。 */
+  const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
+  /** 常用工具的 ⋯ 菜单（上游是平铺在顶栏上的一排按钮，现在收起来）。 */
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const toolsMenuRef = useRef<HTMLDivElement>(null);
+  /** 中间列的实测位置。面板用 fixed 定位，所以坐标得自己量。
+   *  上游量的是顶栏（面板贴在顶栏下沿、宽度取顶栏）；这里改量中间列。 */
+  const [panelBounds, setPanelBounds] = useState<
+    { top: number; left: number; width: number; height: number } | null
+  >(null);
   const mobileToolbarRef = useRef<HTMLDivElement>(null);
   // Branch navigator state — populated by ChatWindow via onBranchDataChange
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
@@ -328,7 +350,6 @@ export function AppShell() {
 
   // Single active panel — only one dropdown open at a time
   const [activeTopPanel, setActiveTopPanel] = useState<"agents" | "branches" | "system" | "tools" | "session" | null>(null);
-  const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   useEffect(() => {
     if (!sessionHasBranches) {
@@ -433,29 +454,63 @@ export function AppShell() {
     };
   }, [mobileToolbarMoreOpen]);
 
+  // ⋯ 工具菜单：点外面 / Esc 关闭。
+  useEffect(() => {
+    if (!toolsMenuOpen) return;
+    const closeMenu = () => {
+      setToolsMenuOpen(false);
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      const inTools = toolsMenuRef.current && target instanceof Node && toolsMenuRef.current.contains(target);
+      if (!inTools) closeMenu();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      closeMenu();
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [toolsMenuOpen]);
+
+  // ⋯ 菜单：打开任何面板都收起它。
+  // （分支曾经是例外，因为它的下拉渲染在菜单内部；现在分支已移到顶栏，不再需要。）
+  useEffect(() => {
+    setToolsMenuOpen(false);
+  }, [activeTopPanel]);
+
   useEffect(() => {
     setMobileToolbarMoreOpen(false);
   }, [isMobile, isNarrowMobile, selectedSession?.id, newSessionDraftId]);
 
+  // 面板锚点定位（topPanelPos + ResizeObserver）已移除：
+  // 面板不再是顶栏下方按顶栏宽度下拉，而是以中间列为基准贴顶铺满，
+  // 所以不需要再每帧测量顶栏位置。见 app/native-theme.css 的 .top-panel-sheet。
+
+  // 信息面板的定位：量中间列的矩形。
+  // 面板在 DOM 里是「顶栏那一行」的子元素（上游如此），那一行只有 36px 高且
+  // position:relative，所以面板必须用 position:fixed 才能逃出该行；
+  // 因此这里像上游一样自己测量并写入 fixed 坐标，只是把对象换成中间列 ——
+  // 于是面板只盖中间，不会盖到左右两侧栏。
   useEffect(() => {
-    if (!activeTopPanel || !topBarRef.current) return;
+    if (!activeTopPanel || !centerColRef.current) return;
     const update = () => {
-      const topBarRect = topBarRef.current!.getBoundingClientRect();
-      if (activeTopPanel === "agents") {
-        setTopPanelPos({
-          top: topBarRect.bottom,
-          left: topBarRect.left,
-          width: Math.min(AGENT_PANEL_WIDTH, topBarRect.width),
-        });
-        return;
-      }
-      setTopPanelPos({ top: topBarRect.bottom, left: topBarRect.left, width: topBarRect.width });
+      const r = centerColRef.current!.getBoundingClientRect();
+      setPanelBounds({ top: r.top, left: r.left, width: r.width, height: r.height });
     };
     update();
     const ro = new ResizeObserver(update);
-    ro.observe(topBarRef.current);
-    return () => ro.disconnect();
-  }, [activeTopPanel, isMobile]);
+    ro.observe(centerColRef.current);
+    window.addEventListener("resize", update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, [activeTopPanel]);
 
   // Files unmount when inactive; workspace terminals stay mounted until closed.
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
@@ -1093,11 +1148,19 @@ export function AppShell() {
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
-    window.open(
+    // 导出地址恒为同源根相对路径（id 已 encode，注入不了 scheme/host）。
+    // 这里显式断言一次同源，再交给浏览器新开一页 ——
+    // 行为与原来的 window.open(..., "_blank", "noopener,noreferrer") 一致。
+    const exportUrl = new URL(
       `/api/sessions/${encodeURIComponent(selectedSession.id)}/export?inline=1`,
-      "_blank",
-      "noopener,noreferrer",
+      window.location.origin,
     );
+    if (exportUrl.origin !== window.location.origin) return;
+    const link = document.createElement("a");
+    link.href = exportUrl.toString();
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.click();
   }, [selectedSession]);
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
@@ -1195,54 +1258,9 @@ export function AppShell() {
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onRunningSessionIdsChange={handleRunningSessionIdsChange}
         onSessionsChange={handleSessionsChange}
+        onOpenSettings={() => setSettingsSection(getLastSettingsSection(projectTrustCwd))}
+        onToggleSidebar={handleSidebarToggle}
       />
-      <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
-        {([
-          ["models", translate("common.models")],
-          ["skills", translate("common.skills")],
-        ] as const).map(([section, label]) => {
-          const disabled = section !== "models" && !projectTrustCwd;
-          return (
-            <button
-              key={section}
-              type="button"
-              onClick={() => setSettingsSection(section)}
-              disabled={disabled}
-              title={disabled ? translate("settings.projectRequired") : label}
-              aria-label={label}
-              style={{
-                flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                height: 32, padding: 0, background: "none", border: "none",
-                borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
-                fontSize: 12, opacity: disabled ? 0.35 : 1,
-                transition: "background 0.12s, color 0.12s",
-              }}
-              onMouseEnter={(event) => { if (!disabled) { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; } }}
-              onMouseLeave={(event) => { event.currentTarget.style.background = "none"; event.currentTarget.style.color = "var(--text-muted)"; }}
-            >
-              <SettingsSectionIcon section={section} size={14} strokeWidth={2} />
-              <span>{label}</span>
-            </button>
-          );
-        })}
-        <button
-          type="button"
-          onClick={() => setSettingsSection(getLastSettingsSection(projectTrustCwd))}
-          title={translate("common.settings")}
-          aria-label={translate("common.settings")}
-          style={{
-            flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            height: 32, padding: 0, background: "none", border: "none",
-            borderRadius: 9, color: "var(--text-muted)", cursor: "pointer",
-            fontSize: 12, transition: "background 0.12s, color 0.12s",
-          }}
-          onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(event) => { event.currentTarget.style.background = "none"; event.currentTarget.style.color = "var(--text-muted)"; }}
-        >
-          <SettingsSectionIcon section="general" size={14} strokeWidth={2} />
-          <span>{translate("common.settings")}</span>
-        </button>
-      </div>
     </>
   );
 
@@ -1482,7 +1500,7 @@ export function AppShell() {
             </span>
           </button>
         )}
-        {sessionHasBranches && (mobile ? (
+        {sessionHasBranches && mobile && (
           <button
             type="button"
             onClick={() => toggleTopPanel("branches", true)}
@@ -1508,18 +1526,10 @@ export function AppShell() {
               <path d="M18 9a9 9 0 0 1-9 9" />
             </svg>
           </button>
-        ) : (
-          <BranchNavigator
-            tree={branchTree}
-            activeLeafId={branchActiveLeafId}
-            onLeafChange={handleBranchLeafChange}
-            inline
-            containerRef={topBarRef}
-            open={activeTopPanel === "branches"}
-            onToggle={() => toggleTopPanel("branches")}
-            hasSession
-          />
-        ))}
+        )}
+        {/* 桌面端的分支不再放在这里：它的下拉是 BranchNavigator 自带的浮层，
+            混在 ⋯ 菜单里会逼出一堆特例（菜单必须保持挂载、下拉高度限制各一套等）。
+            现在它作为一个独立按钮直接渲染在顶栏上（见 topbar-status 之后）。 */}
         <button
           ref={systemBtnRef}
           type="button"
@@ -1936,10 +1946,14 @@ export function AppShell() {
       )}
 
       {/* Center: chat */}
-      <div inert={rightPanelFullWidth} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+      <div ref={centerColRef} inert={rightPanelFullWidth} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Top bar with sidebar toggle */}
         <div ref={topBarRef} style={{ flexShrink: 0, background: "var(--bg-panel)" }}>
-        <div style={{ display: "flex", alignItems: "center", position: "relative", borderBottom: "1px solid var(--border)", height: "calc(36px + env(safe-area-inset-top))", paddingTop: "env(safe-area-inset-top)" }}>
+        <div style={{ display: "flex", alignItems: "center", position: "relative", borderBottom: "1px solid var(--border)", height: "calc(36px + env(safe-area-inset-top))", paddingTop: "env(safe-area-inset-top)", paddingLeft: !isMobile && !sidebarOpen ? TRAFFIC_LIGHTS_WIDTH : undefined }}>
+          {/* 侧栏开着时，收起按钮在左栏顶部那一行（与 macOS 红绿灯各占一处），
+              所以这里只在收起之后才出现 —— 同一件事不再有两个按钮。
+              移动端是浮层抽屉，顶部这行始终留着入口。 */}
+          {(!sidebarOpen || isMobile) && (
           <button
             onClick={handleSidebarToggle}
              title={sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show")}
@@ -1953,16 +1967,14 @@ export function AppShell() {
             onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
             onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
           >
-            {sidebarOpen ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
-              </svg>
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-              </svg>
-            )}
+            {/* 图标固定为「左侧边栏」那个，不随开合切换。
+                原来收起时会变成汉堡包，一来和右边的文件面板开关（始终同一个图标）
+                不一致，二来收起后也看不出这个按钮是干什么的。 */}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
+            </svg>
           </button>
+          )}
           {isMobile && (
             <div
               ref={mobileToolbarRef}
@@ -2038,8 +2050,69 @@ export function AppShell() {
           {!isMobile && (
             <>
               {renderProjectTrustWarning(false)}
-              {renderChatToolbarActions(false)}
-              {renderSessionStatsButton(false)}
+              {/* 状态栏左侧：扩展上报的状态（MCP / LSP …）。
+                  上游把状态放在输入框下方的 shelf 里，这里提到顶栏这一行。 */}
+              <div className="topbar-status">
+                <ExtensionStatusLine statuses={extensionStatuses} />
+              </div>
+              {/* 分支独立成一个按钮，紧贴在 ⋯ 左边。
+                  它自带 position:fixed 的下拉，所以不适合混进 ⋯ 菜单（那会引出
+                  「菜单必须保持挂载」「下拉高度单独一套」之类的特例）。
+                  compact = 只显示图标，不带「分支」文字。 */}
+              {sessionHasBranches && (
+                <BranchNavigator
+                  tree={branchTree}
+                  activeLeafId={branchActiveLeafId}
+                  onLeafChange={handleBranchLeafChange}
+                  inline
+                  compact
+                  containerRef={topBarRef}
+                  open={activeTopPanel === "branches"}
+                  onToggle={() => toggleTopPanel("branches")}
+                  hasSession={showChat}
+                />
+              )}
+              {/* 常用工具收进 ⋯ 菜单。
+                  菜单内容直接复用上游的 renderChatToolbarActions(false)，没有重写。 */}
+              <div className="topbar-tools" ref={toolsMenuRef}>
+                <button
+                  type="button"
+                  className="topbar-tools-trigger"
+                  onClick={() => setToolsMenuOpen((open) => !open)}
+                  title={translate("chat.moreControls")}
+                  aria-label={translate("chat.moreControls")}
+                  aria-expanded={toolsMenuOpen}
+                  aria-pressed={toolsMenuOpen}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <circle cx="5" cy="12" r="1.7" />
+                    <circle cx="12" cy="12" r="1.7" />
+                    <circle cx="19" cy="12" r="1.7" />
+                  </svg>
+                </button>
+                {toolsMenuOpen && (
+                  <div className="topbar-tools-menu">
+                    {/* 信息面板的入口。它原本是顶栏上的 renderSessionStatsButton(false)，
+                        收起来后桌面端就只剩输入框那行能点开，所以在这里补一个入口。
+                        打开用的是上游同一个 toggleTopPanel，没有另写面板逻辑。 */}
+                    <button
+                      type="button"
+                      className="topbar-tools-item"
+                      onClick={() => toggleTopPanel("session")}
+                      aria-pressed={activeTopPanel === "session"}
+                      title={translate("session.info")}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9" />
+                        <line x1="12" y1="7.5" x2="12" y2="7.5" />
+                        <line x1="12" y1="11" x2="12" y2="16.5" />
+                      </svg>
+                      {translate("session.info")}
+                    </button>
+                    {renderChatToolbarActions(false)}
+                  </div>
+                )}
+              </div>
             </>
           )}
           {!isMobile && renderMainFileToggle(false)}
@@ -2057,17 +2130,34 @@ export function AppShell() {
               hideInlineButton
             />
           )}
-          {/* Top panel dropdown — shared, only one active at a time */}
-          {activeTopPanel && topPanelPos && (
-            <div style={{
-              position: "fixed",
-              top: topPanelPos.top,
-              left: topPanelPos.left,
-              width: topPanelPos.width,
-              maxHeight: `calc(100dvh - ${topPanelPos.top}px)`,
-              overflowY: "auto",
-              zIndex: 500,
-            }}>
+          {/* 信息面板 —— 只在中间弹出（贴顶覆盖中间列）。
+              上游是 position:fixed + topPanelPos 贴到顶栏下沿、宽度取顶栏宽度；
+              这里改成以中间列为基准的 absolute 覆盖层，面板内容未动。 */}
+          {activeTopPanel && panelBounds && (
+            <>
+              <div
+                className="top-panel-scrim"
+                style={{
+                  top: panelBounds.top + TOP_BAR_ICON_BUTTON_SIZE,
+                  left: panelBounds.left,
+                  width: panelBounds.width,
+                  height: panelBounds.height - TOP_BAR_ICON_BUTTON_SIZE,
+                }}
+                onClick={() => setActiveTopPanel(null)}
+              />
+              <div
+                ref={topPanelElRef}
+                className="top-panel-sheet"
+                style={{
+                  top: panelBounds.top + TOP_BAR_ICON_BUTTON_SIZE,
+                  left: panelBounds.left,
+                  width: panelBounds.width,
+                  // 高度上限：中间列高减去顶栏那一行，也就是面板最多铺满整列。
+                  // 原来是列高的 62%，内容长的面板（如「工具」，内容 475px）一打开就
+                  // 被截在 392px 上要内部滚动，所以放宽。
+                  maxHeight: Math.max(160, panelBounds.height - TOP_BAR_ICON_BUTTON_SIZE),
+                }}
+              >
               {activeTopPanel === "agents" && activeSessionFamily && selectedSession && (
                 <AgentSessionPanel
                   rootSession={activeSessionFamily.root}
@@ -2095,7 +2185,6 @@ export function AppShell() {
                 <div className="session-info-popover" style={{
                   background: "var(--bg-panel)",
                   borderBottom: "1px solid var(--border)",
-                  boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
                   padding: "12px 16px",
                 }}>
                   {sessionStats ? (() => {
@@ -2297,7 +2386,8 @@ export function AppShell() {
                   )}
                 </div>
               )}
-            </div>
+              </div>
+            </>
           )}
 
         </div>
@@ -2330,6 +2420,7 @@ export function AppShell() {
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
+              onExtensionStatusesChange={setExtensionStatuses}
               onOpenFile={handleOpenLinkedFile}
               onOpenSession={handleOpenSession}
               onAskInNewChat={handleAskInNewChat}
@@ -2447,26 +2538,9 @@ export function AppShell() {
                 : "M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5M3 3l6 6m12-6-6 6M3 21l6-6m12 6-6-6"} />
             </svg>
           </button>
-          <button
-            type="button"
-            onClick={() => setRightPanelOpen(false)}
-            aria-controls="file-panel"
-            aria-expanded={rightPanelOpen}
-            title={translate("files.hidePanel")}
-            aria-label={translate("files.hidePanel")}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center",
-              width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
-              background: "var(--bg-selected)", border: "none", borderLeft: "1px solid var(--border)",
-              color: "var(--text)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
-            }}
-            onMouseEnter={(event) => { event.currentTarget.style.color = "var(--accent)"; }}
-            onMouseLeave={(event) => { event.currentTarget.style.color = "var(--text)"; }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-            </svg>
-          </button>
+          {/* 这里原来还有一个 ▯（隐藏文件面板），与中栏顶栏那个 renderMainFileToggle
+              完全重复（两个开关都在控制同一件事，看起来像两个右侧栏），所以删掉。
+              「全宽」只保留上面的 ⤢。 */}
         </div>
 
         {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}

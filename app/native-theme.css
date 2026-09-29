@@ -1,0 +1,648 @@
+/* ============================================================================
+ * native-theme.css — 本项目自有的样式层
+ *
+ * 归属规则：
+ *   app/globals.css      上游所有   逐字节一致，永不修改
+ *   app/settings.css     上游所有   逐字节一致，永不修改
+ *   app/native-theme.css 本项目所有 本文件
+ *
+ * app/layout.tsx 的引入顺序是 globals → settings → native-theme，
+ * 所以在同优先级下，本文件的规则一定能盖住上游。
+ *
+ * 组件里只做两件事：加一个 className（并删掉被它替代的 inline style）。
+ * ========================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * 本项目新增的令牌
+ * ------------------------------------------------------------------------- */
+:root {
+  /* 上下文环达到高风险阈值时的颜色。pi-web 上游把 #ef4444 硬编码在 AppShell 里，
+     没有令牌；这里补一个，供移植过来的 ContextUsageRing 使用。 */
+  --danger: #ef4444;
+  /* 分段控件滑块的底色。亮色主题 --bg 比 --bg-hover 亮，滑块浮起来；
+     暗色主题反过来（--bg 更暗），得用 --bg-selected 才浮得起来。
+     html.dark 同时覆盖 dark 与 pine —— 见 lib/theme.ts 的 THEME_INIT_SCRIPT:
+     classList.toggle("dark", t === "dark" || t === "pine") */
+  --fork-switch-thumb: var(--bg);
+}
+html.dark {
+  --fork-switch-thumb: var(--bg-selected);
+}
+
+/* ===========================================================================
+ * 左栏：会话 / 文件 拆成两个界面，用一个 switch 切
+ *
+ * 上游左栏是「上下分栏」：会话面板(默认 320px，可拖) + 1px 把手 + 文件面板，
+ * 两者同时可见。这里改成同一时间只显示一个。
+ * 状态复用组件里既有的 explorerOpen，没有新增 state。
+ * ========================================================================= */
+
+/* 左栏的统一尺寸。Codex 那种侧栏看着干净，原因很简单：每一行都是同一个高度、
+   同一个圆角、同一个字号。之前这里是 26/28/32/34 混用，所以像拼出来的。
+   这几个变量只作用于左栏内部。 */
+.session-sidebar-root {
+  --sb-row: 30px;    /* 普通行（新建 / 搜索 / 项目） */
+  --sb-radius: 6px;  /* 行与按钮一律方角 */
+  --sb-font: 12px;
+}
+
+.sidebar-view-switcher {
+  flex: 0 0 auto;
+  padding: 2px 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* 顶栏那一行：桌面版用 overlay 标题栏（见 desktop/src-tauri/src/main.rs），
+   macOS 红绿灯就悬浮在这行左边的空白里，所以左边只留空，
+   设置与收起侧栏靠右 —— 一头一个，互不遮挡。 */
+.sidebar-top-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  /* 与 macOS 标题栏区域等高：红绿灯就在这个高度里居中。
+     tao 的 inset 语义是「按钮下面留多少」（见 desktop/src-tauri/src/main.rs），
+     所以两边的数值得对齐 —— 42 改 48 就是为这个。 */
+  height: 48px;
+  padding: 0 8px;
+  flex: 0 0 auto;
+}
+.sidebar-top-gap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sidebar-top-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  flex-shrink: 0;
+  background: none;
+  border: 0;
+  border-radius: var(--sb-radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.sidebar-top-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ＋ 新建会话 / 项目选择器：同一套「安静的行」。
+   之前它们是填充灰块 + 边框，跟切换器、文件树叠在一起就是满屏灰块，
+   看不出主次。Codex 的做法是平时不画框、悬停才浮一层底，靠前置图标区分身份。 */
+.sidebar-new-session,
+.sidebar-project-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: var(--sb-row);
+  margin: 0 0 2px;
+  padding: 0 8px;
+  background: none;
+  border: 0;
+  border-radius: var(--sb-radius);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--sb-font);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.sidebar-new-session:hover:not(:disabled),
+.sidebar-project-row:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.sidebar-new-session:disabled {
+  color: var(--text-dim);
+  cursor: not-allowed;
+}
+.sidebar-new-session svg,
+.sidebar-project-row svg {
+  flex-shrink: 0;
+}
+
+/* 还没选项目时，这一行要稍微提醒一下，否则看起来就是个普通行 */
+.sidebar-project-row[data-empty="true"] {
+  color: var(--text-dim);
+}
+.sidebar-project-row[data-empty="true"]:hover {
+  color: var(--text);
+}
+
+/* 搜索所有对话：常驻输入框（原来是点图标才展开）。
+   这里保留"输入框"的观感（有一条边），其余行则不画框。 */
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: var(--sb-row);
+  margin: 0 0 2px;
+  padding: 0 8px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--sb-radius);
+  color: var(--text-dim);
+  transition: border-color 0.12s, background 0.12s;
+}
+.sidebar-search:hover {
+  border-color: var(--text-dim);
+}
+.sidebar-search:focus-within {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+.sidebar-search svg {
+  flex-shrink: 0;
+}
+.sidebar-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--sb-font);
+}
+.sidebar-search input::placeholder {
+  color: var(--text-dim);
+}
+
+/* 「项目」分区标题：下面那行是项目选择器（原 CWD picker） */
+.sidebar-project-sect {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 0 6px;
+}
+.sidebar-project-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+.sidebar-sect-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  flex-shrink: 0;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.sidebar-sect-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------------------------
+ * 会话行：标题渐隐截断 + 行内操作菜单
+ * ------------------------------------------------------------------------- */
+
+/* 标题太长时渐隐截断，而不是硬切一个省略号。
+   只在**真的放不下**的时候才加（组件量 scrollWidth/clientWidth 后打 data-overflowing）——
+   mask 一旦写上就永远生效，短标题也会尾巴发虚，所以不能无条件加。
+   右侧的 ⋯ 是独立 flex 项且常占位，所以标题只会缩，永远不会压在它上面。 */
+.session-row-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.session-row-title[data-overflowing="true"] {
+  /* -webkit- 前缀在 WKWebView 里是必需的 */
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent);
+}
+
+/* 行操作入口。用 visibility 而不是「不渲染」：悬停时标题宽度不会跳动。 */
+.session-row-menu-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  flex-shrink: 0;
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-dim);
+  cursor: pointer;
+  visibility: hidden;
+  transition: background 0.12s, color 0.12s;
+}
+.session-row-menu-trigger[data-visible="true"] {
+  visibility: visible;
+}
+.session-row-menu-trigger:hover {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+
+/* 菜单本体。组件用 portal 挂到 body，所以用 fixed 定位，坐标由组件算。 */
+.session-row-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 320;
+}
+.session-row-menu {
+  position: fixed;
+  z-index: 321;
+  min-width: 132px;
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+}
+.session-row-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.session-row-menu-item:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.session-row-menu-item svg {
+  flex-shrink: 0;
+}
+.session-row-menu-item.is-danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+}
+
+.sidebar-view-switcher-track {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg-hover);
+}
+
+.sidebar-view-switcher-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: calc(50% - 2px);
+  height: calc(100% - 4px);
+  border-radius: 6px;
+  background: var(--fork-switch-thumb);
+  /* 去掉那层白色投影。满栏方角控件里浮着一个带阴影的胶囊，
+     是整个左栏最"跳"、也最和别处不搭的一处。
+     圆角也从 999px 收到 6px：左栏里其它东西都是方角，胶囊是唯一的异类。 */
+  box-shadow: none;
+  transition: transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar-view-switcher[data-active="files"] .sidebar-view-switcher-thumb {
+  transform: translateX(100%);
+}
+
+.sidebar-view-switcher button {
+  position: relative;
+  z-index: 1;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--sb-font);
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 160ms ease;
+}
+
+.sidebar-view-switcher button.is-active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.sidebar-view-switcher button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 两个面板的 display / flexDirection 从组件的 inline style 移到这里。
+   必须移：inline style 的 display:flex 会盖住下面的 display:none
+   （样式表规则永远输给 inline style，除非上 !important，而那是错的解法）。 */
+.sidebar-session-pane,
+.sidebar-explorer-section {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 只显示一个面板时，中间的拖拽把手没有意义，一并隐藏 */
+.session-sidebar-root[data-sidebar-view="sessions"] .sidebar-explorer-section,
+.session-sidebar-root[data-sidebar-view="sessions"] .sidebar-section-resize-handle {
+  display: none;
+}
+
+.session-sidebar-root[data-sidebar-view="files"] .sidebar-session-pane,
+.session-sidebar-root[data-sidebar-view="files"] .sidebar-section-resize-handle {
+  display: none;
+}
+
+/* 只剩一个面板时让它占满剩余高度（上游给的是 flex: 0 1 <可拖高度>） */
+.session-sidebar-root[data-sidebar-view="sessions"] .sidebar-session-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.session-sidebar-root[data-sidebar-view="files"] .sidebar-explorer-section {
+  flex: 1 1 auto;
+  min-height: 0;
+  border-top: 0;
+}
+
+/* ===========================================================================
+ * 输入框下方的统计行：上下文百分比 / 总 token / 花费 / 缓存命中率
+ *
+ * 上游把这一行放在右上角（renderSessionStatsButton），点击打开顶栏下拉面板。
+ * 这里挪到输入框下方居中；点击仍是同一个 onSessionStatsPanelOpen，
+ * 面板也仍是 activeTopPanel === "session"，只是呈现位置换了。
+ * ========================================================================= */
+
+
+
+
+/* ===========================================================================
+ * 信息面板 —— 只在中间弹出
+ *
+ * 面板在 DOM 里是「顶栏那一行」的子元素（上游如此），那一行只有 36px 高、
+ * position:relative，所以面板必须用 position:fixed 逃出该行；坐标因此由
+ * AppShell 量出中间列的矩形后写成 inline style（同上游做法），
+ * 只是把测量对象从「顶栏」换成「中间列」—— 于是只盖中间，不盖左右两侧栏。
+ * ========================================================================= */
+.top-panel-scrim {
+  position: fixed;
+  z-index: 499;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.top-panel-sheet {
+  position: fixed;
+  overflow-y: auto;
+  z-index: 500;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ===========================================================================
+ * 顶栏那一行兼作状态栏
+ *
+ * 上游：扩展状态在输入框下方的 shelf 里，工具按钮平铺在顶栏上。
+ * 现在：左 = 扩展状态（MCP / LSP …），右 = 工具收进 ⋯ 菜单 + todo 入口。
+ * ========================================================================= */
+.topbar-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.topbar-status .extension-status-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- todo 等扩展组件的入口 --- */
+
+
+
+
+
+/* --- 工具菜单 --- */
+.topbar-tools {
+  position: relative;
+  flex: 0 0 auto;
+  /* 必须撑满这一行的高度：这一行是 align-items:center，容器不设高就会被压成
+     内容高（16px 图标），里面按钮的 height:100% 随之落空，
+     ⋯ 的底色框就变成 36x16 的长扁形，而不是正方形。 */
+  align-self: stretch;
+}
+
+.topbar-tools-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 正方形：宽 36 对齐同行其它图标按钮（TOP_BAR_ICON_BUTTON_SIZE）。
+     高度靠 height:100% 取父容器高度（父容器已 align-self:stretch）。 */
+  width: 36px;
+  height: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.topbar-tools-trigger:hover,
+.topbar-tools-trigger[aria-pressed="true"] {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.topbar-tools-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 520;
+  min-width: 210px;
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28);
+}
+
+/* 菜单里直接复用上游的 renderChatToolbarActions：它返回的是一排平铺按钮，
+   尺寸、间距、配色都是 inline style，所以这里用 !important 把它改成竖排菜单项。
+   这样做是为了不重写那 ~300 行。
+
+   注意「分支」那一项不是 button，而是 BranchNavigator 的 div（自带触发器+下拉），
+   所以要多匹配一层，否则它会是菜单里唯一没被统一外观的一项。 */
+.topbar-tools-menu > div {
+  flex-direction: column !important;
+  align-items: stretch !important;
+  height: auto !important;
+  gap: 1px;
+}
+
+/* 上游这几个操作项原本是平铺在顶栏上的一排（height 100% / width auto / gap 6 …），
+   收进菜单后统一成竖排菜单项的尺寸与配色：30px 高 / radius 7 / 左右 10px / muted。
+   分支曾经也是菜单里的一项，现在已移出（它自带浮层，不适合放在菜单内部），
+   所以这里不再需要处理「分支项的外层 div」。 */
+.topbar-tools-menu > div > button {
+  width: 100% !important;
+  height: 30px !important;
+  padding: 0 10px !important;
+  justify-content: flex-start !important;
+  border: 0 !important;
+  border-radius: 7px !important;
+  background: none !important;
+  color: var(--text-muted) !important;
+  box-shadow: none !important;
+}
+
+.topbar-tools-menu > div > button:hover {
+  background: var(--bg-hover) !important;
+  color: var(--text) !important;
+}
+
+/* 图标统一配色。上游会在「有内容」时把图标染成 --accent（系统提示词已加载、
+   有启用的工具），这在顶栏上当状态提示是合理的，但放进菜单里会像「被选中」，
+   两项蓝一项灰显得杂，所以这里统一。 */
+.topbar-tools-menu > div > button svg {
+  color: inherit !important;
+  stroke: currentColor !important;
+}
+
+/* ⋯ 菜单里我自己加的那一项（信息面板入口）。
+   外观刻意与上游那些操作项一致（30px 高 / radius 7 / padding 0 10 / muted），
+   这样它看起来就是同一组菜单项，而不是外挂进来的东西。 */
+.topbar-tools-menu > .topbar-tools-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  margin-bottom: 1px;
+  background: none;
+  border: 0;
+  border-radius: 7px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.topbar-tools-menu > .topbar-tools-item:hover,
+.topbar-tools-menu > .topbar-tools-item[aria-pressed="true"] {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.topbar-tools-menu > .topbar-tools-item svg {
+  flex-shrink: 0;
+}
+
+/* ===========================================================================
+ * 中栏右边缘的滚动滑块 —— 常显
+ *
+ * app 里是 WKWebView：globals.css 的 .scrollbar-subtle 把 thumb 做成透明的，
+ * 只在滚动/悬停时靠 .scrollbar-visible 这个类显形 —— 这套显隐时机在 WKWebView 里
+ * 不可靠（浏览器里看得到、app 里看不到）。所以对消息列表把 thumb 固定成可见。
+ * 宽度用满 globals.css 已经留好的 10px 滚动条槽（列表带 scrollbar-gutter:stable，
+ * 所以滑块显出来也不会把正文挤位移）。选择器带上 .scrollbar-subtle 是为了在优先级上
+ * 压过上游那条 transparent。
+ * ========================================================================= */
+.chat-scroll-area::-webkit-scrollbar {
+  width: 10px;
+}
+.chat-scroll-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-scroll-area::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--text-dim) 42%, transparent);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.chat-scroll-area::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--text-dim) 70%, transparent);
+  background-clip: padding-box;
+}
+.chat-scroll-area::-webkit-scrollbar-thumb:active {
+  background-color: var(--text-dim);
+  background-clip: padding-box;
+}
+
+/* ===========================================================================
+ * 控制条中间槽位里的上下文统计（ChatInput 的 contextSlot）
+ *
+ * 上游注释写的就是 “left | center (context) | right”，但中间一直只是个空 spacer。
+ * 现在中间槽 flex:1 + 居中，所以「到左侧模型选择器」和「到右侧思维力度」等距。
+ * 点击仍是同一个 onSessionStatsPanelOpen → 中间弹出的信息面板。
+ * ========================================================================= */
+/* 整个控件就是一个按钮、一个外框：圆环 + 百分比 + 总 token + 缓存 + 花费。
+   尺寸对齐同一行里的其他控件（推理级别 / 工具预设 等用的是
+   height 32 + padding 8px 12px + borderRadius 9 + fontSize 12）。*/
+.chat-context-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  background: none;
+  border: none;
+  border-radius: 9px;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.chat-context-stats:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+
+/* ===========================================================================
+ * 信息面板：去掉外阴影
+ *
+ * .top-panel-sheet 自己的阴影已移除；但信息面板内容（.session-info-popover）
+ * 还带一层，来源是上游那段动画 —— keyframes 的 100% 里写了 box-shadow，
+ * 且 animation-fill-mode: both，所以阴影会一直保留。
+ * CSS 动画的优先级高于普通声明，只有 !important 能盖过它。
+ * 这里用覆盖而不是去改上游的 keyframes，保持"fork 样式集中在 native-theme.css"。
+ * ========================================================================= */
+.session-info-popover {
+  box-shadow: none !important;
+}

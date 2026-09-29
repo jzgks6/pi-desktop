@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { SessionInfo } from "@/lib/types";
 import { listSessionFamilies } from "@/lib/session-family";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
@@ -15,6 +16,7 @@ import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { SessionSearch } from "./SessionSearch";
+import { SettingsSectionIcon } from "./SettingsPanel";
 
 // Fixed row height for the session list. SessionItem renders at exactly this
 // height, so the list can be windowed (only the visible slice is mounted).
@@ -131,6 +133,11 @@ interface Props {
   onBackgroundTaskDone?: () => void;
   onRunningSessionIdsChange?: (ids: Set<string>) => void;
   onSessionsChange?: (sessions: SessionInfo[]) => void;
+  /** 打开设置面板。上游这个入口在左栏底部的三个按钮里（模型/技能/设置），
+   *  底栏删掉后改由左栏头部这个图标承担，否则设置面板就没入口了。 */
+  onOpenSettings?: () => void;
+  /** 收起左侧栏。桌面版把它放在左栏顶部右边（与 macOS 红绿灯各占一处）。 */
+  onToggleSidebar?: () => void;
 }
 
 interface WorktreeEntry {
@@ -294,95 +301,11 @@ function AnimatedDropdown({ open, children, style }: { open: boolean; children: 
 
 
 
-const SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+// 原来的「Pi Web」标题（点它变成版本号的那个）已移除：会话视图现在以
+// 「＋ 新建会话」打头，文件视图是纯文件浏览器，两处都不需要标题。
+// 需要的可从 git 历史里取回（含 SCRAMBLE_CHARS / useScramble / PiWebTitle）。
 
-function useScramble(target: string, running: boolean): string {
-  const [display, setDisplay] = useState(target);
-  const frameRef = useRef<number | null>(null);
-  const iterRef = useRef(0);
-
-  useEffect(() => {
-    if (!running) {
-      setDisplay(target);
-      return;
-    }
-    iterRef.current = 0;
-    const totalFrames = target.length * 4;
-
-    const step = () => {
-      iterRef.current += 1;
-      const progress = iterRef.current / totalFrames;
-      const resolved = Math.floor(progress * target.length);
-
-      setDisplay(
-        target
-          .split("")
-          .map((char, i) => {
-            if (char === " ") return " ";
-            if (i < resolved) return char;
-            return SCRAMBLE_CHARS[Math.floor(Math.random() * SCRAMBLE_CHARS.length)];
-          })
-          .join("")
-      );
-
-      if (iterRef.current < totalFrames) {
-        frameRef.current = requestAnimationFrame(step);
-      } else {
-        setDisplay(target);
-      }
-    };
-
-    frameRef.current = requestAnimationFrame(step);
-    return () => { if (frameRef.current) cancelAnimationFrame(frameRef.current); };
-  }, [target, running]);
-
-  return display;
-}
-
-function PiWebTitle() {
-  const [showVersion, setShowVersion] = useState(false);
-  const [scrambling, setScrambling] = useState(false);
-  const revertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const target = showVersion ? `${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}p${process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}` : "Pi Web";
-  const display = useScramble(target, scrambling);
-
-  const triggerScramble = useCallback((toVersion: boolean) => {
-    setShowVersion(toVersion);
-    setScrambling(true);
-    setTimeout(() => setScrambling(false), (toVersion ? 6 : 8) * 4 * (1000 / 60) + 100);
-  }, []);
-
-  const handleClick = useCallback(() => {
-    if (revertTimerRef.current) clearTimeout(revertTimerRef.current);
-
-    const next = !showVersion;
-    triggerScramble(next);
-
-    if (next) {
-      revertTimerRef.current = setTimeout(() => triggerScramble(false), 3000);
-    }
-  }, [showVersion, triggerScramble]);
-
-  useEffect(() => () => { if (revertTimerRef.current) clearTimeout(revertTimerRef.current); }, []);
-
-  return (
-    <button
-      onClick={handleClick}
-      style={{
-        background: "none", border: "none", padding: 0, cursor: "default",
-        fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em",
-        color: showVersion ? "var(--accent)" : "var(--text)",
-        fontFamily: "var(--font-mono)",
-        minWidth: "6ch",
-      }}
-    >
-      {display}
-    </button>
-  );
-}
-
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, onOpenSettings, onToggleSidebar }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   // Tracked in a ref only: the version is compared against the polled value to
@@ -417,9 +340,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
-  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [sessionSearchQuery, setSessionSearchQuery] = useState("");
-  const sessionSearchActive = sessionSearchOpen && Boolean(sessionSearchQuery.trim());
+  // 搜索框改成常驻（在顶栏下面一行），所以「正在搜索」只看有没有输入内容
+  const sessionSearchActive = Boolean(sessionSearchQuery.trim());
   const [changesCount, setChangesCount] = useState(0);
   const [changesCollapsed, setChangesCollapsed] = useState(true);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
@@ -1099,6 +1022,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   return (
     <div
       ref={sessionPaneResizer.panelRef}
+      className="session-sidebar-root"
+      data-sidebar-view={explorerOpen ? "files" : "sessions"}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -1107,6 +1032,77 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         "--sidebar-session-pane-height": `${sessionPaneResizer.width}px`,
       } as CSSProperties}
     >
+      {/* 顶栏那一行：左边空出来给 macOS 红绿灯（桌面版窗口控件就悬浮在这里），
+          右边放设置与收起侧栏 —— 一头一个，互不遮挡。 */}
+      <div className="sidebar-top-row">
+        {/* 这一段空位既是 mac 红绿灯的位置，也是窗口的拖动区。
+            data-tauri-drag-region 只在 Tauri 里生效，网页版会当成一个未知属性忽略。 */}
+        <span className="sidebar-top-gap" aria-hidden="true" data-tauri-drag-region="" />
+        {onOpenSettings && (
+          <button
+            type="button"
+            className="sidebar-top-btn"
+            onClick={onOpenSettings}
+            title={t("common.settings")}
+            aria-label={t("common.settings")}
+          >
+            <SettingsSectionIcon section="general" size={17} strokeWidth={1.8} />
+          </button>
+        )}
+        {onToggleSidebar && (
+          <button
+            type="button"
+            className="sidebar-top-btn"
+            onClick={onToggleSidebar}
+            title={t("sidebar.hide")}
+            aria-label={t("sidebar.hide")}
+          >
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
+            </svg>
+          </button>
+        )}
+      </div>
+
+      {/* 会话 / 文件 切换器 —— 在顶栏那一行下面，独立一行。
+          上游把两者上下分栏、同时显示（会话面板 + 可拖把手 + 文件面板）；
+          这里同一时间只显示一个：状态复用既有的 explorerOpen，没有新增 state，
+          样式与切换动画在 app/native-theme.css。 */}
+      <div
+        className="sidebar-view-switcher"
+        data-active={explorerOpen ? "files" : "sessions"}
+        role="tablist"
+      >
+        <div className="sidebar-view-switcher-track">
+          <span className="sidebar-view-switcher-thumb" aria-hidden="true" />
+          <button
+            type="button"
+            role="tab"
+            aria-selected={!explorerOpen}
+            className={explorerOpen ? undefined : "is-active"}
+            onClick={() => {
+              setExplorerOpen(false);
+              saveExplorerOpen(false);
+            }}
+          >
+            {t("sidebar.viewSessions")}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={explorerOpen}
+            className={explorerOpen ? "is-active" : undefined}
+            disabled={!(selectedCwdProp || selectedCwd)}
+            onClick={() => {
+              setExplorerOpen(true);
+              saveExplorerOpen(true);
+            }}
+          >
+            {t("sidebar.viewFiles")}
+          </button>
+        </div>
+      </div>
+
       {customPathOpen && (
         <DirectoryPicker
           initialPath={customPathValue}
@@ -1122,90 +1118,80 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       {/* Header */}
       <div
         style={{
-          padding: "12px 10px 10px",
+          // 文件视图里标题行被藏起来了，顶部留白收一收
+          padding: explorerOpen ? "10px" : "12px 10px 10px",
           borderBottom: "1px solid var(--border)",
           flexShrink: 0,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <PiWebTitle />
-          <div style={{ display: "flex", gap: 6 }}>
-            <button
-              onClick={handleNewSession}
-              disabled={!selectedCwd}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                background: "var(--bg-hover)",
-                border: "1px solid var(--border)",
-                color: selectedCwd ? "var(--text-muted)" : "var(--text-dim)",
-                cursor: selectedCwd ? "pointer" : "not-allowed",
-                height: 32,
-                paddingLeft: 10,
-                paddingRight: 12,
-                borderRadius: 7,
-                fontSize: 12,
-                fontWeight: 500,
-                letterSpacing: "-0.01em",
-                flexShrink: 0,
-                transition: "background 0.12s, color 0.12s, border-color 0.12s",
+        {/* 新建会话 —— 满宽按钮；只在「会话」视图里出现。
+            「文件」视图要的是一台纯粹的文件浏览器，这些入口跟文件无关。
+            下面的项目选择器两个视图都保留 —— 它决定文件树浏览哪个目录。 */}
+        {!explorerOpen && (
+          <button
+            type="button"
+            onClick={handleNewSession}
+            disabled={!selectedCwd}
+            className="sidebar-new-session"
+            title={selectedCwd ? t("sidebar.newSessionTitle", { path: selectedCwd }) : t("sidebar.selectProject")}
+          >
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+              <line x1="6" y1="1" x2="6" y2="11" />
+              <line x1="1" y1="6" x2="11" y2="6" />
+            </svg>
+            {t("sidebar.newSession")}
+          </button>
+        )}
+
+        {/* 搜索所有对话 —— 常驻输入框（原来是点图标才展开）。
+            列表过滤只看有没有输入内容，见 sessionSearchActive。 */}
+        {!explorerOpen && (
+          <label className="sidebar-search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
+            </svg>
+            <input
+              id="session-search-input"
+              type="search"
+              value={sessionSearchQuery}
+              maxLength={200}
+              aria-label={t("sidebar.searchSessions")}
+              placeholder={t("sidebar.searchSessions")}
+              onChange={(event) => setSessionSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.stopPropagation();
+                  setSessionSearchQuery("");
+                }
               }}
-             title={selectedCwd ? t("sidebar.newSessionTitle", { path: selectedCwd }) : t("sidebar.selectProject")}
-              onMouseEnter={(e) => {
-                if (!selectedCwd) return;
-                e.currentTarget.style.background = "var(--bg-selected)";
-                e.currentTarget.style.color = "var(--accent)";
-                e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = selectedCwd ? "var(--text-muted)" : "var(--text-dim)";
-                e.currentTarget.style.borderColor = "var(--border)";
-              }}
-            >
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                <line x1="6" y1="1" x2="6" y2="11" />
-                <line x1="1" y1="6" x2="11" y2="6" />
-              </svg>
-              {t("sidebar.new")}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setSessionSearchOpen((open) => !open);
-                setWtDropdownOpen(false);
-              }}
-              title={t("sidebar.toggleSessionSearch")}
-              aria-label={t("sidebar.toggleSessionSearch")}
-              aria-expanded={sessionSearchOpen}
-              aria-controls="session-search-input"
-              className={`flex h-[32px] w-[32px] shrink-0 cursor-pointer items-center justify-center rounded-[7px] border border-border hover:bg-bg-selected focus-visible:outline-2 focus-visible:outline-accent ${sessionSearchOpen ? "bg-bg-selected text-accent" : "bg-bg-hover text-text-muted"}`}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
-              </svg>
-            </button>
-          </div>
+            />
+          </label>
+        )}
+
+        {/* 项目 —— 下面一行是项目选择器（沿用原 CWD picker，逻辑未动）*/}
+        <div className="sidebar-project-sect">
+          <span className="sidebar-project-label">{t("sidebar.projects")}</span>
+          <button
+            type="button"
+            className="sidebar-sect-btn"
+            onClick={handleCustomPathClick}
+            title={t("sidebar.customPath")}
+            aria-label={t("sidebar.customPath")}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+              <line x1="6" y1="1" x2="6" y2="11" /><line x1="1" y1="6" x2="11" y2="6" />
+            </svg>
+          </button>
         </div>
 
         {/* CWD picker */}
         <div ref={dropdownRef} style={{ position: "relative" }}>
           <button
+            type="button"
+            className="sidebar-project-row"
+            data-empty={selectedCwd ? undefined : "true"}
             onClick={() => setDropdownOpen((v) => !v)}
             title={selectedProject?.root ?? selectedCwd ?? ""}
-            style={{
-              width: "100%",
-              display: "flex",
-              alignItems: "center",
-              padding: "6px 10px",
-              background: selectedCwd ? "var(--bg-hover)" : "rgba(37,99,235,0.06)",
-              border: selectedCwd ? "1px solid var(--border)" : "1px solid rgba(37,99,235,0.4)",
-              borderRadius: 7,
-              cursor: "pointer",
-              fontSize: 12,
-              color: "var(--text)",
-              textAlign: "left",
-              transition: "border-color 0.15s, background 0.15s",
-            }}
           >
             {selectedCwd ? (
               <PathLabel
@@ -1392,26 +1378,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           </AnimatedDropdown>
         </div>
 
-        {sessionSearchOpen && (
-          <input
-            id="session-search-input"
-            type="search"
-            autoFocus
-            value={sessionSearchQuery}
-            maxLength={200}
-            aria-label={t("sidebar.searchSessions")}
-            placeholder={t("sidebar.searchSessions")}
-            onChange={(event) => setSessionSearchQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.stopPropagation();
-                setSessionSearchQuery("");
-              }
-            }}
-            className="mt-[6px] block h-[29px] w-full min-w-0 rounded-[7px] border border-border bg-bg px-[10px] text-xs text-text focus:outline-2 focus:outline-accent"
-          />
-        )}
-
         {/* Worktree switcher — shown only for git projects at a checkout top
             level (repo subdirs keep their own project identity, so switching
             from them would jump projects). Rendered whenever the selected cwd
@@ -1419,7 +1385,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             switching between worktrees of one project keeps the row mounted
             instead of flickering while data refetches: all worktrees of a
             project share the same list anyway. */}
-        {!sessionSearchOpen && showWorktreeSwitcher && (() => {
+        {!sessionSearchActive && showWorktreeSwitcher && (() => {
           if (!worktreeState) return null;
           const showWtFilter = worktreeState.worktrees.length >= 8;
           const visibleWorktrees = showWtFilter && wtFilter.trim()
@@ -1727,7 +1693,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             </div>
           );
         })()}
-        {!sessionSearchOpen && inactiveWorktreeSelector && (
+        {!sessionSearchActive && inactiveWorktreeSelector && (
           <button
             type="button"
             aria-disabled="true"
@@ -1768,9 +1734,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       {/* Session list */}
       <div
         ref={sessionPaneRef}
+        className="sidebar-session-pane"
         style={{
-          display: "flex",
-          flexDirection: "column",
           flex: explorerOpen && (selectedCwdProp || selectedCwd)
             ? "0 1 var(--sidebar-session-pane-height, 320px)"
             : "1 1 auto",
@@ -1778,7 +1743,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           overflow: "hidden",
         }}
       >
-        <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
+        <SessionSearch open={sessionSearchActive} query={sessionSearchQuery} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
         <div
           ref={listScrollRef}
           onScroll={handleListScroll}
@@ -1870,10 +1835,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       {(selectedCwdProp || selectedCwd) && (
         <div
           ref={explorerSectionRef}
+          className="sidebar-explorer-section"
           style={{
-            borderTop: "1px solid var(--border)",
-            display: "flex",
-            flexDirection: "column",
             flex: explorerOpen ? "1 1 0" : "0 0 auto",
             minHeight: explorerOpen ? EXPLORER_PANE_MIN_HEIGHT : 0,
             overflow: "hidden",
@@ -2123,6 +2086,38 @@ function showProjectActivity(
   );
 }
 
+/**
+ * 内容是不是真的放不下（决定要不要加渐隐截断）。
+ *
+ * 纯 CSS 做不到「有条件地加 mask」—— mask 一旦写上就永远生效，短标题的尾巴也会发虚。
+ * 所以这里量 scrollWidth / clientWidth。
+ *
+ * 两个触发点都要：content 变了（换标题）要重量；宽度变了（侧栏拖宽、窗口缩放）也要重量。
+ * ResizeObserver 盯的是元素自己的盒子，而标题是被 flex 压窄的，文本变短时盒子尺寸未必变，
+ * 所以 content 必须也在依赖里。
+ */
+function useOverflowingText<T extends HTMLElement>(content: string) {
+  const ref = useRef<T | null>(null);
+  const [overflowing, setOverflowing] = useState(false);
+
+  const measure = useCallback(() => {
+    const element = ref.current;
+    if (!element) return;
+    setOverflowing(element.scrollWidth > element.clientWidth + 1);
+  }, []);
+
+  useLayoutEffect(() => {
+    measure();
+    const element = ref.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [measure, content]);
+
+  return { ref, overflowing };
+}
+
 function SessionItem({
   session,
   isSelected,
@@ -2154,7 +2149,42 @@ function SessionItem({
   const [renameValue, setRenameValue] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // 行操作菜单（重命名 / 删除）。位置用 fixed 算，见 toggleRowMenu。
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * 打开/关闭行操作菜单。
+   *
+   * 位置用 fixed 算、再用 portal 挂到 body —— 会话行容器有 overflow 裁剪，
+   * 菜单长在行里会被切掉，所以按 ⋯ 的矩形自己定位。
+   */
+  const toggleRowMenu = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (menuOpen) {
+      setMenuOpen(false);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    setMenuPos({
+      top: rect.bottom + 4,
+      // 右对齐到 ⋯ 的右边缘（再夹一下，避开滚动条/窗口边）
+      right: Math.max(8, window.innerWidth - rect.right),
+    });
+    setMenuOpen(true);
+  }, [menuOpen]);
+
+  // Esc 关菜单；点菜单项和点背景由各自的 handler 负责关。
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [menuOpen]);
 
   // Select the whole name once the rename input is mounted (startRename's
   // immediate setTimeout can fire before the input exists).
@@ -2170,6 +2200,7 @@ function SessionItem({
   // it as the auto-name fallback, mirroring MessageView's rendering.
   const displayFirstMessage = skillExpansionToCommand(session.firstMessage) ?? session.firstMessage;
   const title = session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12);
+  const titleOverflow = useOverflowingText<HTMLSpanElement>(title);
 
   const startRename = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -2345,6 +2376,8 @@ function SessionItem({
               <path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
             </svg>
           )}
+          {/* 标题：太长时渐隐截断（不是硬切省略号）。
+              右侧的 ⋯ 是独立的 flex 项且常占位，所以标题只会缩，不会压到它头上。 */}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div
               style={{
@@ -2359,7 +2392,11 @@ function SessionItem({
               }}
               title={title}
             >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+              <span
+                ref={titleOverflow.ref}
+                className="session-row-title"
+                data-overflowing={titleOverflow.overflowing ? "true" : undefined}
+              >
                 {title}
               </span>
             </div>
@@ -2411,67 +2448,65 @@ function SessionItem({
             </button>
           )}
 
-          {/* Action buttons — shown on hover */}
-          {hovered && !session.transient && (
-            <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-              <button
-                onClick={startRename}
-                title={t("sidebar.rename")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 32, height: 32, padding: 0,
-                  background: "var(--bg-hover)", border: "1px solid var(--border)",
-                  borderRadius: 7, color: "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
-                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--bg-selected)";
-                  e.currentTarget.style.color = "var(--accent)";
-                  e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text-muted)";
-                  e.currentTarget.style.borderColor = "var(--border)";
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-                </svg>
-              </button>
-              <button
-                onClick={handleDeleteClick}
-                title={t("sidebar.deleteWithShiftClick")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 32, height: 32, padding: 0,
-                  background: "var(--bg-hover)", border: "1px solid var(--border)",
-                  borderRadius: 7, color: "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
-                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "rgba(239,68,68,0.08)";
-                  e.currentTarget.style.color = "#ef4444";
-                  e.currentTarget.style.borderColor = "rgba(239,68,68,0.35)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text-muted)";
-                  e.currentTarget.style.borderColor = "var(--border)";
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="3 6 5 6 21 6" />
-                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                  <path d="M10 11v6M14 11v6" />
-                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                </svg>
-              </button>
-            </div>
+          {/* 行操作入口。
+              默认占位但不可见（visibility，不是不渲染）—— 这样悬停时标题宽度不会跳动，
+              也永远不会被标题压住。重命名/删除收进菜单里：之前是两个 32px 的按钮
+              直接铺在行上，又占宽又抢注意力。 */}
+          {!session.transient && (
+            <button
+              type="button"
+              className="session-row-menu-trigger"
+              data-visible={hovered || menuOpen ? "true" : undefined}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              title={t("sidebar.moreActions")}
+              aria-label={t("sidebar.moreActions")}
+              onClick={toggleRowMenu}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="5" cy="12" r="1.5" />
+                <circle cx="12" cy="12" r="1.5" />
+                <circle cx="19" cy="12" r="1.5" />
+              </svg>
+            </button>
           )}
         </>
+      )}
+
+      {/* 菜单用 portal 挂到 body：行容器有 overflow 裁剪，菜单长在行里会被切掉。
+          位置用 fixed + right 对齐到 ⋯ 下方。 */}
+      {menuOpen && menuPos && createPortal(
+        <>
+          <div className="session-row-menu-backdrop" onClick={() => setMenuOpen(false)} aria-hidden="true" />
+          <div className="session-row-menu" role="menu" style={{ top: menuPos.top, right: menuPos.right }}>
+            <button
+              type="button"
+              role="menuitem"
+              className="session-row-menu-item"
+              onClick={(e) => { setMenuOpen(false); startRename(e); }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+              </svg>
+              {t("sidebar.rename")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="session-row-menu-item is-danger"
+              onClick={(e) => { setMenuOpen(false); handleDeleteClick(e); }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                <path d="M10 11v6M14 11v6" />
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+              </svg>
+              {t("sidebar.delete")}
+            </button>
+          </div>
+        </>,
+        document.body,
       )}
     </div>
   );
