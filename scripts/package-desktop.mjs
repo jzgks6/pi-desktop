@@ -24,7 +24,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, statSync, readdirSync, copyFileSync, chmodSync, realpathSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -368,12 +368,21 @@ function assertRuntimeMatchesBuild() {
 
 function stepIcons() {
   const target = join(TAURI_DIR, "icons", "icon.icns");
-  if (existsSync(target) && !flag("force-icons")) {
-    log("图标已存在，跳过（要重建加 --force-icons）");
+  // 图标源：优先 fork 自己的 desktop/icon.png（由 scripts/make-icon.py 生成），
+  // 没有才回落到上游 PWA 用的 public/icons/icon-512.png。
+  const forkMaster = join(REPO, "desktop", "icon.png");
+  const source = existsSync(forkMaster)
+    ? forkMaster
+    : join(REPO, "public", "icons", "icon-512.png");
+  // 源文件比产物新也要重建，否则改完图标会静默地不生效
+  const fresh =
+    existsSync(target) && statSync(target).mtimeMs >= statSync(source).mtimeMs;
+  if (fresh && !flag("force-icons")) {
+    log("图标已是最新，跳过（要强制重建加 --force-icons）");
     return;
   }
   step("生成 app 图标");
-  const source = join(REPO, "public", "icons", "icon-512.png");
+  log(`  源：${relative(REPO, source)}`);
   // tauri icon 会从一张 PNG 生成 icns/ico/各尺寸 png
   execFileSync("cargo", ["tauri", "icon", source, "--output", "icons"], {
     cwd: TAURI_DIR,
