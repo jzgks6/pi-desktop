@@ -101,7 +101,95 @@
 
 ---
 
-## 七、和上游保持一致的三个取舍点
+## 七、上游更新后怎么操作（逐条命令）
+
+### 先弄清两个远端
+
+| 名字 | 是什么 | 用途 |
+| --- | --- | --- |
+| `origin` | 你自己的 fork（`jzgks6/pi-desktop`） | 你写的东西推到这里 |
+| `upstream` | 上游（`agegr/pi-web`） | **只读**，只从它拉，永远不往它推 |
+
+你的历史是「上游的一长串提交 + 顶上你自己的 1 个提交」。
+上游更新就是它那条串尾上又长了几个提交；你要做的是把这些新提交接进来，
+同时保留自己顶上那个 —— 这就是 `git merge upstream/main` 干的事。
+
+**为什么不能图省事直接把自己的目录覆盖过去**：你的代码是基于**较早的上游**写的，
+覆盖等于把上游后来做的功能删掉。本项目第一次同步时上游正好多了 3 个提交
+（`fd037e4` / `6a1246e` / `433d09e`），其中 7 个文件与本地改动重叠，
+直接覆盖就会静默地把它们删掉。
+
+### 命令
+
+```bash
+git remote add upstream https://github.com/agegr/pi-web.git   # 只需一次
+git remote set-url --push upstream DISABLE                    # 防止手误往上游推，只需一次
+```
+
+以后每次上游更新：
+
+```bash
+# 1. 确认工作区干净（有未提交的改动就先 commit）
+git status
+
+# 2. 抓上游的最新提交（只下载，不动你的文件）
+git fetch upstream
+
+# 3. 看看上游新增了什么（可选）
+git log --oneline HEAD..upstream/main
+
+# 4. 先留一条退路：出问题可以 git reset --hard backup/before-merge 回到现在
+git branch backup/before-merge
+
+# 5. 合并上游 —— 这一步可能报 CONFLICT（见下）
+git merge upstream/main
+
+# 6. 门禁，三项都要通过
+npx tsc --noEmit
+npx eslint .
+npm test
+
+# 7. 推到你自己的仓库
+git push
+```
+
+### 第 5 步报冲突怎么办
+
+`git status` 会把冲突文件列在 `Unmerged paths` 下。打开它们会看到：
+
+```text
+<<<<<<< HEAD
+（你的版本）
+=======
+（上游的版本）
+>>>>>>> upstream/main
+```
+
+把它改成最终想要的样子（多数情况是两边各留一部分），删掉 `<<<<<<<` / `=======` /
+`>>>>>>>` 这三行标记，然后：
+
+```bash
+git add <改好的文件>     # 声明这个文件已解决
+git merge --continue     # 完成这次合并（沿用自动生成的那条信息即可）
+```
+
+改完记得**再跑一次门禁**。冲突里最容易出事的不是报错，而是「语法没错但两边只留了一边」——
+测试一般能抓住，所以第 6 步不要跳。
+
+### 不要做的事
+
+- 不要 `git push --force`：会改掉远端历史
+- 不要用 `git pull` 拉上游：`pull` = `fetch` + `merge`，容易糊里糊涂合错东西，分成两步看清楚更安全
+- 不要在没留 `backup/xxx` 分支的情况下动手
+
+### 合并后如果界面不对
+
+先确认是不是 `.next` 缓存：`node_modules/.bin/next build`（开发时用 `npm run dev`）。
+界面本身要看的那几处（红绿灯位置、左栏观感、滚动条）在 `desktop/README.md` 末尾有清单。
+
+---
+
+## 八、和上游保持一致的三个取舍点
 
 这几处是**有意偏离上游**的，移植时不要「顺手改回去」：
 
