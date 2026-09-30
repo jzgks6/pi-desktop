@@ -46,6 +46,20 @@ macOS 把 ⌘T / ⌘W / ⌘, 这类组合先交给**应用菜单**，网页根�
 
 菜单文案是写死的中文（原生菜单在启动时就建好了，拿不到网页的 i18n）。
 
+### 新窗口：由系统浏览器打开
+
+网页里点「完整历史」之类会在新窗口里打开的东西，在 app 里原本**毫无反应**（在浏览器里正常）。
+原因在 WebView 这一层：WKWebView 要开新窗口时会问宿主（`createWebViewWith`），
+`wry` 只在应用注册了 `WebviewWindowBuilder::on_new_window` 时才回答，**没注册就直接 `else { None }`**。
+
+`main.rs` 的 `new_window_to_browser(port)` 把这类请求接下来：
+
+- 只放行「`http` + `127.0.0.1`/`localhost` + **我们自己的端口**」的 URL，用 `/usr/bin/open`
+  交给系统默认浏览器（导出的会话 HTML 就是这种）；其它一律不打开；
+- 返回值一律 `NewWindowResponse::Deny` —— 不让 Tauri 自己再开一个应用窗口。
+
+网页侧一行没改（仍是 `<a target="_blank">`），所以同一份前端在普通浏览器里依然是开自己的标签页。
+
 ## 打包
 
 ```bash

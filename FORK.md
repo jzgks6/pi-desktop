@@ -45,7 +45,7 @@
 | `components/ChatContextStats.tsx` | 输入框下方中间槽那一行：圆环 + 百分比 + 总 token + 缓存 + 花费 |
 | `components/ContextUsageRing.tsx` | 从上游移植的圆环，加了 `decorative` 模式（避免 button 嵌套 button） |
 | `design-prototypes/sessions-sidebar.html` | 左栏的设计稿（仅存档，无代码作用） |
-| `desktop/`（7 个文件） | macOS 外壳：Tauri 工程 + 启动页 + 说明，详见 `desktop/README.md`。`src/main.rs` 里还建了一份应用菜单，注册三个原生快捷键：**⌘T** 新建空白会话标签、**⌘W** 关闭当前标签、**⌘,** 打开设置。三者都只把命令 `eval` 成 CustomEvent 交给网页（见 `hooks/useDesktopMenuCommands.ts`）。菜单里**不能**再放「关闭窗口」（默认菜单那个 ⌘W 必须拿掉，否则两个 ⌘W 打架；现在 ⌘W 完全不碰窗口）；编辑菜单必须留着，否则输入框里的 ⌘C/⌘V/⌘A 会失效 |
+| `desktop/`（7 个文件） | macOS 外壳：Tauri 工程 + 启动页 + 说明，详见 `desktop/README.md`。`src/main.rs` 里还建了一份应用菜单，注册三个原生快捷键：**⌘T** 新建空白会话标签、**⌘W** 关闭当前标签、**⌘,** 打开设置。三者都只把命令 `eval` 成 CustomEvent 交给网页（见 `hooks/useDesktopMenuCommands.ts`）。菜单里**不能**再放「关闭窗口」（默认菜单那个 ⌘W 必须拿掉，否则两个 ⌘W 打架；现在 ⌘W 完全不碰窗口）；编辑菜单必须留着，否则输入框里的 ⌘C/⌘V/⌘A 会失效」；另外 `main.rs` 注册了 `on_new_window`，把指向自己服务的新窗口请求交给系统默认浏览器（否则网页里的 `window.open` / `target="_blank"` 会被 WebView 静默丢掉，点「完整历史」没反应） |
 | `scripts/package-desktop.mjs` | 打包脚本：组装运行时 → 裁剪 → `cargo tauri build` → 启动验证 |
 | `reference/README.md` | 参考副本的说明（副本本身被 `.gitignore` 排除） |
 
@@ -82,10 +82,11 @@
 2. 先拷**第二节的新增文件** —— 它们不依赖上游内部结构，冲突风险最低。
 3. 再按**第三节**逐文件改，每个文件只动那一行说明里的几处；改完对照该行自查。
 4. 处理**第四节**的删除，并清掉全部残留引用。
-5. `desktop/` + `scripts/` 一般不用动，只确认三件事：
+5. `desktop/` + `scripts/` 一般不用动，只确认四件事：
    - `bin/pi-web.js` 的 CLI（`-p` / `--no-open`）与 `.next` 的目录约定没变；
    - `tauri.conf.json` 的 `productName`、`bundle.resources: ["runtime/"]` 仍在；
-   - `main.rs` 里对 `runtime/app/...` 的路径假设仍成立。
+   - `main.rs` 里对 `runtime/app/...` 的路径假设仍成立；
+   - `.on_new_window(...)` 仍在（没了的话，网页里的新窗口请求会被 WebView 静默丢弃）。
 6. **跑门禁**：`npx tsc --noEmit` → 0、`npx eslint .` → 0、`npm test`（1379 项）。
    注意 macOS 上要先 `TMPDIR=/private/tmp/pi-test-tmp npm test`（原因见 AGENTS.md 的 Quick Start）。
    界面上还有几条要人眼看的：红绿灯位置、左栏观感、滚动条。
@@ -113,6 +114,13 @@
   包能打出来但 app 永远停在启动页）。三条都是「app 里跑的不是这份源码」之后加的。
 - **改 `productName` 后 `cargo tauri build` 不会删旧包**，`bundle/macos` 下会新旧并存；
   按名字挑产物的地方（含脚本的验证步）可能挑到旧的，脚本现在会自动清掉。
+- **WebView 不会自己开新窗口。** WKWebView 通过 `createWebViewWith` 问宿主，而 wry 只在应用
+  注册了 `WebviewWindowBuilder::on_new_window` 时才回答，没注册就直接 `else { None }` ——
+  网页里的 `window.open` / `<a target="_blank">` 因此会被**静默丢掉**（点「完整历史」在 app 里
+  没反应、在浏览器里正常，就是这个原因）。`main.rs` 现在注册 `new_window_to_browser(port)`：
+  只把指向自己服务（`127.0.0.1`/`localhost` + 自己的端口）的请求交给 `/usr/bin/open`
+  （系统默认浏览器），再用 `NewWindowResponse::Deny` 收尾。网页侧一行没改，
+  所以在普通浏览器里仍然是开自己的标签页。
 
 ---
 

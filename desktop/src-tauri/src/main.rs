@@ -64,10 +64,43 @@ fn server_url(port: u16) -> Option<tauri::Url> {
 /// 所以按钮会随这个值整体下移 —— 实测斜率正好是 1（y 36→26 时，截图上位置也下移了
 /// 10pt）。逐次实测标定（目标 = 左栏那行 48px 里控件的垂直中心，距顶 24pt）：
 /// y=14 太靠上；y=36 太下面；y=26 偏低；y=22 仍偏低一点点；故取 20。
+/// 用系统默认浏览器打开一个 URL（`/usr/bin/open`）。失败只打日志，不影响 app。
+fn open_in_default_browser(url: &str) {
+    if let Err(err) = Command::new("/usr/bin/open").arg(url).spawn() {
+        eprintln!("[pi-web-desktop] 打开系统浏览器失败: {err}");
+    }
+}
+
+/// 「新窗口」处理器：把指向**我们自己服务**的新窗口请求交给系统默认浏览器。
+///
+/// 不注册它的话，WKWebView 的 `createWebViewWith` 没人接 —— wry 在没有 handler 时
+/// 直接走 `else { None }`，网页里的 `window.open` / `<a target="_blank">` 会被静默
+/// 丢掉（点「完整历史」在 app 里没反应、在浏览器里却正常，就是这个原因）。
+/// 只放行「http + 本机 + 我们自己的端口」，其余一律拒绝。
+fn new_window_to_browser(
+    port: u16,
+) -> impl Fn(
+    tauri::Url,
+    tauri::webview::NewWindowFeatures,
+) -> tauri::webview::NewWindowResponse<tauri::Wry>
+       + Send
+       + 'static {
+    move |url, _features| {
+        let is_our_server = url.scheme() == "http"
+            && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
+            && url.port_or_known_default() == Some(port);
+        if is_our_server {
+            open_in_default_browser(url.as_str());
+        }
+        tauri::webview::NewWindowResponse::Deny
+    }
+}
+
 fn app_window<'a>(
     manager: &'a tauri::AppHandle,
     label: &str,
     url: WebviewUrl,
+    port: u16,
 ) -> tauri::WebviewWindowBuilder<'a, tauri::Wry, tauri::AppHandle> {
     tauri::WebviewWindowBuilder::new(manager, label, url)
         .title("pi desktop")
@@ -76,6 +109,7 @@ fn app_window<'a>(
         .traffic_light_position(tauri::LogicalPosition::new(20.0, 20.0))
         .inner_size(1440.0, 900.0)
         .min_inner_size(900.0, 600.0)
+        .on_new_window(new_window_to_browser(port))
 }
 
 /// 等服务开始监听端口后把窗口导航到应用上（在那之前窗口显示的是启动页）。
@@ -441,7 +475,7 @@ fn main() {
 
             // 主窗口先建出来显示启动页，避免等服务时是一片空白。
             // 窗口配置（含红绿灯标定）都在 app_window 里，⌘N 开出来的窗口共用同一套。
-            let window = app_window(app.handle(), "main", WebviewUrl::App("index.html".into()))
+            let window = app_window(app.handle(), "main", WebviewUrl::App("index.html".into()), port)
                 .center()
                 .build()?;
             spawn_navigate_when_ready(window, port);

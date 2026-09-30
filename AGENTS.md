@@ -203,6 +203,14 @@ Two guards, both added after real failures:
   been deleted from the source), and
 * the runtime's `.next/BUILD_ID` must equal the repo's, otherwise packaging aborts.
 
+**The webview cannot open new windows on its own.** WKWebView asks its host through
+`createWebViewWith`, wry answers only when the app registered `WebviewWindowBuilder::on_new_window`,
+and with no handler it ends in `else { None }` — so `window.open` and `<a target="_blank">` are
+dropped silently. That is why the chat toolbar's “完整历史” (exported session HTML) did nothing in
+the app while working fine in a browser. `main.rs` now registers `new_window_to_browser(port)`: it
+opens same-origin requests (`127.0.0.1`/`localhost` + our own port) with `/usr/bin/open` and returns
+`NewWindowResponse::Deny`. The page side is unchanged, so a plain browser still opens its own tab.
+
 ---
 
 ## Key Design Decisions & Traps
