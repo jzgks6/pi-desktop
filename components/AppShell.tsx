@@ -3,11 +3,13 @@
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { useDesktopMenuCommands } from "@/hooks/useDesktopMenuCommands";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
-import { TabBar, type Tab } from "./TabBar";
+import { FileTabStrip } from "./FileTabStrip";
+import type { Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
 import { SettingsPanel } from "./SettingsPanel";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
@@ -16,7 +18,7 @@ import { SystemPromptPanel } from "./SystemPromptPanel";
 import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
 import { AgentSessionPanel } from "./AgentSessionPanel";
 import { TerminalPanel } from "./TerminalPanel";
-import { ExtensionStatusLine } from "./ExtensionStatusBar";
+import { SessionTabBar, type SessionTabView } from "./SessionTabBar";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
@@ -37,7 +39,25 @@ import { setupPushSubscription } from "@/lib/push-client";
 import { getInitialNavigation, withTabOpen } from "@/lib/initial-navigation";
 import { clearTabOpenSession, getTabOpen, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
 import { mergeCatalogRow } from "./session-catalog-helpers";
-import { rekeyDraft } from "@/lib/draft-store";
+import { clearDraft, rekeyDraft } from "@/lib/draft-store";
+import {
+  activeTabOf,
+  activationOf,
+  closeTab as closeSessionTab,
+  draftKeyForTab,
+  moveTab,
+  openDraftTab,
+  openSessionTab,
+  parkedDraftKeyForTab,
+  promoteDraftTab,
+  readSessionTabs,
+  removeSessionTab,
+  replaceTabSession,
+  tabIdFromDraftKey,
+  writeSessionTabs,
+  type SessionTab,
+} from "@/lib/session-tabs";
+import { skillExpansionToCommand } from "@/lib/slash-display";
 import {
   clearLastOpen,
   getLastOpenSession,
@@ -55,7 +75,7 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
-import type { BlockingExtensionUiRequest, ExtensionStatusItem, SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -81,9 +101,13 @@ const TOP_BAR_ICON_BUTTON_SIZE = 36;
  *  所以这时要让开这一段。移动端没有窗口控件，不需要。 */
 const TRAFFIC_LIGHTS_WIDTH = 80;
 
-function parkedNewSessionDraftKey(cwd: string): string {
-  return `parked-new:${cwd}`;
-}
+/** 右栏全宽时，它的头部给红绿灯留的宽度。
+ *
+ *  这里比顶栏那个 80 更宽：右栏头部第一个元素是文件标签条，标签左边直接顶到
+ *  padding 边缘；而顶栏第一个元素是自带内边距的图标按钮，同样的 80 看着就有余量。
+ *  红绿灯本身占 20 → 72（见 main.rs 的 traffic_light_position(20, 20)，三个
+ *  12px 圆点 + 8px 间隔），所以 96 留出 24px 空档。 */
+const RIGHT_PANEL_TRAFFIC_LIGHTS_WIDTH = 96;
 
 export function AppShell() {
   const router = useRouter();
@@ -129,6 +153,23 @@ export function AppShell() {
     if (soundEnabledRef.current) playDoneSound();
   }, [playDoneSound, soundEnabledRef]);
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
+  /**
+   * 中栏的会话标签。顶栏那一行左端就是它（取代了上游的扩展状态行）。
+   * 每个标签一个会话，或一个还没发出消息的空白新会话（`sessionId === null`，
+   * 就是「正中间一个输入框」那个页面）。
+   */
+  const [sessionTabs, setSessionTabs] = useState<SessionTab[]>([]);
+  const [activeSessionTabId, setActiveSessionTabId] = useState<string | null>(null);
+  /** 恢复之前不能写回 localStorage，否则会用空列表盖掉上次的标签。 */
+  const sessionTabsRestoredRef = useRef(false);
+  /** 恢复完成后才允许把标签列表写回去。 */
+  const [sessionTabsReady, setSessionTabsReady] = useState(false);
+  // 不把标签放进各个 handler 的依赖里：这些 handler 已经串了很多调用方，
+  // 用 ref 读最新值可以避免每次开关标签都重建一整套回调。
+  const sessionTabsRef = useRef<SessionTab[]>([]);
+  const activeSessionTabIdRef = useRef<string | null>(null);
+  /** 恢复的草稿标签要求用它的 id 当 draft id（而不是 `initial:<cwd>`）。 */
+  const pendingDraftTabIdRef = useRef<string | null>(null);
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
   const handleSessionsChange = useCallback((sessions: SessionInfo[]) => {
     setSessionCatalog(sessions);
@@ -267,8 +308,6 @@ export function AppShell() {
   const topPanelElRef = useRef<HTMLDivElement>(null);
   /** 中间列。面板要盖住的是它，不是整个视口。 */
   const centerColRef = useRef<HTMLDivElement>(null);
-  /** 扩展状态（ChatWindow 上报）。顶栏那一行兼作状态栏，左侧显示它。 */
-  const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   /** 常用工具的 ⋯ 菜单（上游是平铺在顶栏上的一排按钮，现在收起来）。 */
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
@@ -579,6 +618,41 @@ export function AppShell() {
   const activeProjectKeyRef = useRef<string | null>(null);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
+  // sessionStorage 是空的（SSR）且首帧不能读 localStorage，否则客户端树首帧
+  // 会与服务端 HTML 不一致，所以两个恢复都在 mount 后的 layout effect 里做。
+  //
+  // 顺序很重要：会话标签先于「浏览器标签记忆」——标签列表是更强的意图，
+  // 而且 URL 如果明确指定了会话 / 目录（深链、通知点击）就以 URL 为准。
+  useLayoutEffect(() => {
+    if (sessionTabsRestoredRef.current) return;
+    sessionTabsRestoredRef.current = true;
+
+    const stored = readSessionTabs();
+    if (stored) setSessionTabs(stored.tabs);
+    if (stored) setActiveSessionTabId(stored.activeId);
+    setSessionTabsReady(true);
+    if (!stored) return;
+    // URL 已经有明确目标时不要覆盖它；打开流程会按规则去重 / 追加标签。
+    if (initialNavigation.requestedCwd || initialNavigation.sessionId) return;
+
+    const activation = activationOf(activeTabOf(stored));
+    if (!activation) return;
+    if (activation.kind === "session") {
+      setInitialNavigation((prev) => ({ ...prev, sessionId: activation.sessionId }));
+      setInitialSessionRestored(false);
+      return;
+    }
+    // 空白草稿标签：用**它自己的** id 当 draft id，草稿键才是稳定的。
+    pendingDraftTabIdRef.current = activation.draftId;
+    setInitialNavigation((prev) => ({ ...prev, requestedCwd: activation.cwd }));
+  }, [initialNavigation]);
+
+  /** 标签列表持久化（按标签 id 停放草稿的前提就是标签 id 跨启动稳定）。 */
+  useEffect(() => {
+    if (!sessionTabsReady) return;
+    writeSessionTabs({ tabs: sessionTabs, activeId: activeSessionTabId });
+  }, [activeSessionTabId, sessionTabs, sessionTabsReady]);
+
   // sessionStorage is empty during SSR. Applying the tab's remembered session
   // in the useState initializer made the first client tree differ from the
   // server HTML (sidebar "select project" vs ""). Restore after mount instead.
@@ -617,6 +691,24 @@ export function AppShell() {
     if (newSessionCwd) setTabOpenNewSession(newSessionCwd);
   }, [newSessionCwd, selectedSession]);
 
+  /** 当前标签列表（handler / effect 读 ref，不把它们挂到 state 依赖上）。 */
+  const currentTabsState = useCallback(() => ({
+    tabs: sessionTabsRef.current,
+    activeId: activeSessionTabIdRef.current,
+  }), []);
+
+  /** 把标签列表的变更落回 state。
+   *
+   *  **同时写穿 ref**：同一个事件里可能连着走几个 handler（关标签 → 打开右邻居），
+   *  而 ref 平时要等 render 才同步，不写穿的话第二个 handler 会读到关之前的列表，
+   *  把刚关掉的标签又加回来。 */
+  const applyTabsState = useCallback((next: { tabs: SessionTab[]; activeId: string | null }) => {
+    sessionTabsRef.current = next.tabs;
+    activeSessionTabIdRef.current = next.activeId;
+    setSessionTabs(next.tabs);
+    setActiveSessionTabId(next.activeId);
+  }, []);
+
   useEffect(() => {
     const requestedCwd = initialNavigation.requestedCwd;
     if (!requestedCwd) return;
@@ -640,9 +732,17 @@ export function AppShell() {
         // The sidebar will notify us when it adopts this cwd. Avoid remounting
         // the just-created empty chat during that initial synchronization.
         suppressCwdBumpRef.current = true;
-        const draftId = `initial:${requestedCwd}`;
-        setNewSessionDraftId(draftId);
-        activeNewSessionDraftKeyRef.current = `new:${draftId}:${data.cwd}`;
+        const draftId = pendingDraftTabIdRef.current ?? `initial:${requestedCwd}`;
+        pendingDraftTabIdRef.current = null;
+        // 顶栏标签必须和中间显示的东西对得上：这条路径显示的是「新会话」页面，
+        // 所以得确保草稿标签存在并聚焦。
+        // （链接里带 ?cwd= 时上面会先恢复上次的标签列表，那些标签原样留着不抢焦点；
+        //  不这么做的话列表里会有一个「看着是活动标签、点下去却没反应」的标签。）
+        const tabsState = openDraftTab(currentTabsState(), draftId, data.cwd);
+        applyTabsState(tabsState);
+        const activeDraftId = tabsState.activeId ?? draftId;
+        setNewSessionDraftId(activeDraftId);
+        activeNewSessionDraftKeyRef.current = draftKeyForTab(activeDraftId, data.cwd);
         setNewSessionCwd(data.cwd);
         setInitialCwdStatus("ready");
         if (!new URLSearchParams(window.location.search).get("cwd")) {
@@ -656,13 +756,62 @@ export function AppShell() {
       });
 
     return () => controller.abort();
-  }, [initialNavigation, router]);
+  }, [applyTabsState, currentTabsState, initialNavigation, router]);
+
+  /* ------------------------------------------------------------------ *
+   * 会话标签（中栏顶栏）与草稿标签的支撑逻辑
+   * ------------------------------------------------------------------ */
+
+  const newTabId = useCallback(() => (
+    typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  ), []);
+
+  /**
+   * 切走一个草稿标签前，把它的正文挪到「按标签停放」的键下。
+   * 必须做：`useAgentSession` 卸载时会 `clearDraft(活动键)`，不停走就等于删掉
+   * 用户没发出去的正文。按标签停放（而不是上游的按 cwd），同一目录下多个草稿才不互相覆盖。
+   */
+  const parkActiveDraft = useCallback(() => {
+    const key = activeNewSessionDraftKeyRef.current;
+    const tabId = tabIdFromDraftKey(key);
+    if (!key || !tabId) return;
+    rekeyDraft(key, parkedDraftKeyForTab(tabId));
+  }, []);
+
+  /** 回到一个草稿标签时把停放的正文挪回活动键。 */
+  const restoreParkedDraft = useCallback((tabId: string, cwd: string) => {
+    rekeyDraft(parkedDraftKeyForTab(tabId), draftKeyForTab(tabId, cwd));
+  }, []);
+
+  /**
+   * 把一个草稿标签变成当前视图（「正中间一个输入框」那个新会话页面）。
+   */
+  const enterDraftTab = useCallback((tab: SessionTab) => {
+    parkActiveDraft();
+    restoreParkedDraft(tab.id, tab.cwd);
+    setActiveSessionTabId(tab.id);
+    setNewSessionDraftId(tab.id);
+    setNewSessionCwd(tab.cwd);
+    setSelectedSession(null);
+    setSessionKey((k) => k + 1);
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
+    branchLeafChangeFnRef.current = null;
+    setSystemPrompt(null);
+    setSystemTools(null);
+    setSystemInfoLoading(false);
+    setActiveTopPanel(null);
+    if (isMobile) setSidebarOpen(false);
+    router.replace(`?cwd=${encodeURIComponent(tab.cwd)}`, { scroll: false });
+  }, [isMobile, parkActiveDraft, restoreParkedDraft, router]);
 
   // Restore the workspace's last open session after switching to it. Called
   // from handleCwdChange once the outgoing context has been reset. The session
   // is looked up against the live list so a deleted or drifted session falls
   // back to the default welcome page instead of erroring.
-  const restoreWorkspaceContext = useCallback((projectKey: string, cwd: string) => {
+  const restoreWorkspaceContext = useCallback((projectKey: string) => {
     const token = ++workspaceRestoreTokenRef.current;
     const lastOpenSessionId = getLastOpenSession(projectKey);
     if (!lastOpenSessionId) return;
@@ -681,13 +830,13 @@ export function AppShell() {
         clearLastOpen(projectKey);
         return;
       }
-      // Keep the temporary composer's draft in its cwd, even when the
-      // remembered session belongs to another worktree of this project.
-      const activeDraftKey = activeNewSessionDraftKeyRef.current;
-      if (activeDraftKey) {
-        rekeyDraft(activeDraftKey, parkedNewSessionDraftKey(cwd));
-      }
+      // 切到这个工作区时，若当前还停在空白草稿标签上，就留着它（空白页只由用户关），
+      // 会话另开一个标签。
+      // 先停放草稿：接下来要把视图切到会话上，卸载的 ChatWindow 会清掉活动草稿键。
+      parkActiveDraft();
+      applyTabsState(openSessionTab(currentTabsState(), s));
       activeNewSessionDraftKeyRef.current = null;
+      setNewSessionCwd(null);
       // Selecting the session must remount the chat with the session
       // present: useAgentSession loads content in a mount-only effect, so
       // the null-session welcome mount from the switch would never load
@@ -710,7 +859,7 @@ export function AppShell() {
       .catch(() => {
         // Network hiccup: keep the remembered session for a later retry.
       });
-  }, [router, sessionCatalog]);
+  }, [applyTabsState, currentTabsState, parkActiveDraft, router, sessionCatalog]);
 
   const handleCwdChange = useCallback((
     cwd: string | null,
@@ -745,24 +894,21 @@ export function AppShell() {
     ) {
       return;
     }
-    // Close any session that belongs to a different project — it no longer
-    // matches the selected project directory.
-    const previousDraftKey = activeNewSessionDraftKeyRef.current;
-    if (previousDraftKey && currentFreshCwd) {
-      rekeyDraft(previousDraftKey, parkedNewSessionDraftKey(currentFreshCwd));
+    // 切到另一个项目 / 目录：把当前草稿停放好，然后在标签上开一个新会话页面。
+    // 全应用只有一个草稿标签，它会被复用到新目录下而不是新建。
+    parkActiveDraft();
+    const nextTabs = openDraftTab(currentTabsState(), newTabId(), cwd);
+    applyTabsState(nextTabs);
+    const draftTab = nextTabs.tabs.find((tab) => tab.id === nextTabs.activeId);
+    if (draftTab) {
+      restoreParkedDraft(draftTab.id, draftTab.cwd);
+      setNewSessionDraftId(draftTab.id);
     }
-    const draftId = typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID()
-      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-    const draftKey = `new:${draftId}:${cwd}`;
-    rekeyDraft(parkedNewSessionDraftKey(cwd), draftKey);
-    setNewSessionDraftId(draftId);
-    activeNewSessionDraftKeyRef.current = draftKey;
+    activeNewSessionDraftKeyRef.current = draftTab
+      ? draftKeyForTab(draftTab.id, draftTab.cwd)
+      : null;
     setSelectedSession(null);
-    setNewSessionCwd((prev) => {
-      if (prev && prev !== cwd) return null;
-      return prev;
-    });
+    setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
@@ -780,19 +926,15 @@ export function AppShell() {
       }
       // Restore the workspace we switched to: its last open session, or keep
       // the default welcome page when none is remembered.
-      restoreWorkspaceContext(newProject, cwd);
+      restoreWorkspaceContext(newProject);
     }
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
-  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
+  }, [activeCwd, activeFileTabId, applyTabsState, currentTabsState, invalidateWorkspaceRestore, newSessionCwd, newTabId, parkActiveDraft, restoreParkedDraft, restoreWorkspaceContext, router, selectedSession]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false, entryId?: string, blockIndex?: number) => {
     setSearchTarget(entryId ? { sessionId: session.id, entryId, blockIndex } : null);
     invalidateWorkspaceRestore();
-    const activeDraftKey = activeNewSessionDraftKeyRef.current;
-    const activeDraftCwd = newSessionCwd ?? (selectedSession === null ? activeCwd : null);
-    if (activeDraftKey && activeDraftCwd) {
-      rekeyDraft(activeDraftKey, parkedNewSessionDraftKey(activeDraftCwd));
-    }
+    parkActiveDraft();
     activeNewSessionDraftKeyRef.current = null;
     // Adopt an explicitly selected session before the sidebar reports its cwd.
     const projectKey = workspaceKeyOf(session);
@@ -818,6 +960,9 @@ export function AppShell() {
       }
     }
     setNewSessionCwd(null);
+    // 标签：已有该会话的标签就跳过去，否则追加一个新标签。
+    // 空白草稿标签一律不动 —— 它只由用户点 ✕ 关掉。
+    applyTabsState(openSessionTab(currentTabsState(), session));
     setSelectedSession(session);
     setSessionKey((k) => k + 1);
     setBranchTree([]);
@@ -841,16 +986,22 @@ export function AppShell() {
     if (!isRestore || new URLSearchParams(window.location.search).get("session") !== session.id) {
       router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
     }
-  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, router, isMobile, newSessionCwd, selectedSession]);
+  }, [activeFileTabId, applyTabsState, currentTabsState, invalidateWorkspaceRestore, parkActiveDraft, router, isMobile, selectedSession]);
 
   const handleNewSession = useCallback((sessionId: string, cwd: string) => {
     invalidateWorkspaceRestore();
-    const draftKey = `new:${sessionId}:${cwd}`;
-    rekeyDraft(parkedNewSessionDraftKey(cwd), draftKey);
-    activeNewSessionDraftKeyRef.current = draftKey;
-    setNewSessionDraftId(sessionId);
+    // 侧栏的 + / 全局快捷键 / 标签条的 +：开一个空白新会话标签并聚焦。
+    // 全应用只有一个草稿标签，它会被复用（连同已经打进去的字）。
+    parkActiveDraft();
+    const nextTabs = openDraftTab(currentTabsState(), sessionId, cwd);
+    applyTabsState(nextTabs);
+    const draftTab = nextTabs.tabs.find((tab) => tab.id === nextTabs.activeId);
+    if (!draftTab) return;
+    restoreParkedDraft(draftTab.id, draftTab.cwd);
+    activeNewSessionDraftKeyRef.current = draftKeyForTab(draftTab.id, draftTab.cwd);
+    setNewSessionDraftId(draftTab.id);
     setSelectedSession(null);
-    setNewSessionCwd(cwd);
+    setNewSessionCwd(draftTab.cwd);
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
@@ -859,8 +1010,8 @@ export function AppShell() {
     setSystemInfoLoading(false);
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
-    router.replace(`?cwd=${encodeURIComponent(cwd)}`, { scroll: false });
-  }, [invalidateWorkspaceRestore, router, isMobile]);
+    router.replace(`?cwd=${encodeURIComponent(draftTab.cwd)}`, { scroll: false });
+  }, [applyTabsState, currentTabsState, invalidateWorkspaceRestore, parkActiveDraft, restoreParkedDraft, router, isMobile]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -908,14 +1059,24 @@ export function AppShell() {
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo, sourceDraftKey: string) => {
     setRefreshKey((k) => k + 1);
-    if (activeNewSessionDraftKeyRef.current !== sourceDraftKey) return;
+    // 草稿标签转正：填上 sessionId、id 换成 session id，位置不动。
+    const draftTabId = tabIdFromDraftKey(sourceDraftKey);
+    if (!draftTabId) return;
+    const pendingDraftTab = sessionTabsRef.current.find(
+      (tab) => tab.id === draftTabId && tab.sessionId === null,
+    );
+    if (!pendingDraftTab) return;
+    const wasActive = activeSessionTabIdRef.current === draftTabId;
+    applyTabsState(promoteDraftTab(currentTabsState(), draftTabId, session.id));
+    // 后台转正（用户已经切到别的标签了）不抢当前视图。
+    if (!wasActive) return;
     invalidateWorkspaceRestore();
     activeNewSessionDraftKeyRef.current = null;
     setNewSessionCwd(null);
     setSelectedSession(session);
     hydrateSelectedSession(session.id);
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
-  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
+  }, [applyTabsState, currentTabsState, hydrateSelectedSession, invalidateWorkspaceRestore, router]);
 
   const deliverSessionNotification = useCallback(({
     targetSession,
@@ -1034,6 +1195,12 @@ export function AppShell() {
     setRefreshKey((k) => k + 1);
     setSessionKey((k) => k + 1);
     setNewSessionCwd(null);
+    // fork 出来的是一个新会话，但它就是当前视图的延续，所以**当前标签就地改身份**
+    // （而不是再开一个标签）—— 与原行为一致：原来的会话回到侧栏，随时能重新打开。
+    const currentTabId = activeSessionTabIdRef.current;
+    if (currentTabId) {
+      applyTabsState(replaceTabSession(currentTabsState(), currentTabId, newSessionId));
+    }
     setSelectedSession((prev) => ({
       ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
       id: newSessionId,
@@ -1041,7 +1208,7 @@ export function AppShell() {
     }));
     hydrateSelectedSession(newSessionId);
     router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
+  }, [applyTabsState, currentTabsState, invalidateWorkspaceRestore, router, hydrateSelectedSession]);
 
   const handleAskInNewChat = useCallback(async (
     prompt: string,
@@ -1064,26 +1231,74 @@ export function AppShell() {
   const handleSessionDeleted = useCallback((sessionId: string) => {
     invalidateWorkspaceRestore();
     setRefreshKey((k) => k + 1);
-    if (selectedSession?.id === sessionId) {
-      clearTabOpenSession(sessionId);
-      const cwd = selectedSession.cwd;
-      const draftId = typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-      setNewSessionDraftId(draftId);
-      activeNewSessionDraftKeyRef.current = cwd ? `new:${draftId}:${cwd}` : null;
-      setSelectedSession(null);
-      setNewSessionCwd(cwd ?? null);
-      setSessionKey((k) => k + 1);
-      setBranchTree([]);
-      setBranchActiveLeafId(null);
-      setSystemPrompt(null);
-      setSystemTools(null);
-      setSystemInfoLoading(false);
-      setActiveTopPanel(null);
-      router.replace(cwd ? `?cwd=${encodeURIComponent(cwd)}` : (typeof window !== "undefined" ? window.location.pathname : "/"), { scroll: false });
+
+    const wasActive = selectedSession?.id === sessionId;
+    const cwd = selectedSession?.cwd ?? null;
+    let nextTabs = removeSessionTab(currentTabsState(), sessionId);
+    // 关掉最后一个标签时补一个空白标签：中栏任何时候都该有个会话页面。
+    if (wasActive && nextTabs.tabs.length === 0 && cwd) {
+      nextTabs = openDraftTab(nextTabs, newTabId(), cwd);
     }
-  }, [invalidateWorkspaceRestore, selectedSession, router]);
+    applyTabsState(nextTabs);
+    // 不是当前会话的删除：只需把它的标签收掉，视图不动。
+    if (!wasActive) return;
+
+    clearTabOpenSession(sessionId);
+    const activeTab = activeTabOf(nextTabs);
+    if (activeTab?.sessionId) {
+      // 焦点落到了邻居**会话**标签：完整加载它。
+      void handleOpenSession(activeTab.sessionId);
+      return;
+    }
+    if (activeTab) {
+      enterDraftTab(activeTab);
+      return;
+    }
+    // 连 cwd 都没有（未选项目）：回到欢迎页。
+    setSelectedSession(null);
+    setNewSessionCwd(null);
+    setSessionKey((k) => k + 1);
+    router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
+  }, [applyTabsState, currentTabsState, enterDraftTab, handleOpenSession, invalidateWorkspaceRestore, newTabId, router, selectedSession]);
+
+  /** 顶栏标签条：切换标签。会话标签走正常打开流程，草稿标签回到新会话页面。 */
+  const handleSelectSessionTab = useCallback((tabId: string) => {
+    if (tabId === activeSessionTabIdRef.current) return;
+    const tab = sessionTabsRef.current.find((item) => item.id === tabId);
+    if (!tab) return;
+    if (tab.sessionId) {
+      void handleOpenSession(tab.sessionId);
+      return;
+    }
+    enterDraftTab(tab);
+  }, [enterDraftTab, handleOpenSession]);
+
+  /**
+   * 顶栏标签条：关闭标签。
+   * 只关视图 —— 会话文件、正在跑的任务、后台的 wrapper 都不受影响；
+   * 关掉最后一个时会补一个空白标签，所以中栏不会变成一片空。
+   */
+  const handleCloseSessionTab = useCallback((tabId: string) => {
+    const tab = sessionTabsRef.current.find((item) => item.id === tabId);
+    if (!tab) return;
+    const wasActive = activeSessionTabIdRef.current === tabId;
+
+    let nextTabs = closeSessionTab(currentTabsState(), tabId);
+    if (nextTabs.tabs.length === 0) nextTabs = openDraftTab(nextTabs, newTabId(), tab.cwd);
+    applyTabsState(nextTabs);
+
+    // 标签自己的草稿正文不再需要，清掉别留在内存里。
+    clearDraft(draftKeyForTab(tab.id, tab.cwd));
+    clearDraft(parkedDraftKeyForTab(tab.id));
+
+    if (!wasActive) return;
+    const activeTab = activeTabOf(nextTabs);
+    if (activeTab?.sessionId) {
+      void handleOpenSession(activeTab.sessionId);
+      return;
+    }
+    if (activeTab) enterDraftTab(activeTab);
+  }, [applyTabsState, currentTabsState, enterDraftTab, handleOpenSession, newTabId]);
 
   const handleOpenFile = useCallback((
     filePath: string,
@@ -1146,6 +1361,29 @@ export function AppShell() {
     });
   }, [fileTabs, terminalTabs]);
 
+  /**
+   * 右栏标签拖动排序（沿用会话标签条那一下标语义：拖走之后的下标）。
+   *
+   * `panelTabs` 是 `fileTabs` + 终端标签拼出来的，而拖动只给一对下标 —— 所以这里
+   * 按「落点之前有几个文件标签」换算成 `fileTabs` 里的插入位置。跨到终端标签那一侧时
+   * 就自然夹在文件标签组的边缘：两组的成员分别存在两个 state 里，跨组拖动没有意义
+   * （拖过去也拼不出一个合理的顺序），各自组内有序就够了。
+   */
+  const handleReorderPanelTab = (fromIndex: number, toIndex: number) => {
+    const moved = panelTabs[fromIndex];
+    if (!moved || moved.kind === "terminal") return;
+    const fromFileIndex = fileTabs.findIndex((tab) => tab.id === moved.id);
+    if (fromFileIndex < 0) return;
+    const insertAt = panelTabs
+      .filter((_, index) => index !== fromIndex)
+      .slice(0, toIndex)
+      .filter((tab) => tab.kind !== "terminal").length;
+    const next = [...fileTabs];
+    const [removed] = next.splice(fromFileIndex, 1);
+    next.splice(Math.min(insertAt, next.length), 0, removed);
+    setFileTabs(next);
+  };
+
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
     // 导出地址恒为同源根相对路径（id 已 encode，注入不了 scheme/host）。
@@ -1175,6 +1413,57 @@ export function AppShell() {
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
+
+  // 标签条要用最新的标签 / 焦点（handler 里读 ref）。在 render 里同步一次，
+  // 这样事件处理器拿到的永远是当前值，不用把它们挂到这些 state 的依赖上。
+  sessionTabsRef.current = sessionTabs;
+  activeSessionTabIdRef.current = activeSessionTabId;
+
+  // 标签条上的 +：在当前目录开一个空白新会话标签（与侧栏那个 + 等价）。
+  const handleNewSessionTab = useCallback(() => {
+    const cwd = effectiveNewSessionCwd ?? selectedSession?.cwd ?? activeCwd;
+    if (!cwd) return;
+    handleNewSession(newTabId(), cwd);
+  }, [activeCwd, effectiveNewSessionCwd, handleNewSession, newTabId, selectedSession?.cwd]);
+
+  // 拖动排序：只改顺序，不动活动标签。
+  const handleReorderSessionTab = useCallback((tabId: string, toIndex: number) => {
+    applyTabsState(moveTab(currentTabsState(), tabId, toIndex));
+  }, [applyTabsState, currentTabsState]);
+
+  // ⌘W：关掉**当前标签**。标签关光了由 handleCloseSessionTab 自己补一个空白标签，
+  // 所以这里不需要特殊处理。
+  const handleCloseActiveSessionTab = useCallback(() => {
+    const tabId = activeSessionTabIdRef.current;
+    if (tabId) handleCloseSessionTab(tabId);
+  }, [handleCloseSessionTab]);
+
+  const handleOpenSettings = useCallback(() => {
+    setSettingsSection(getLastSettingsSection(projectTrustCwd));
+  }, [projectTrustCwd]);
+
+  // 桌面壳（macOS 原生菜单）发过来的 ⌘T / ⌘W / ⌘, —— 那几个键被应用菜单先吃掉了，
+  // 页面收不到 keydown（浏览器里没人派发这些事件，纯 no-op）。
+  useDesktopMenuCommands({
+    onNewTab: handleNewSessionTab,
+    onCloseTab: handleCloseActiveSessionTab,
+    onOpenSettings: handleOpenSettings,
+  });
+
+  // 标签的显示数据：标题优先取会话名，其次首条消息，最后 id。
+  const sessionTabViews: SessionTabView[] = useMemo(() => sessionTabs.map((tab) => {
+    if (!tab.sessionId) return { tab, title: translate("sidebar.newSession"), running: false };
+    const info = sessionCatalog.find((session) => session.id === tab.sessionId)
+      ?? (selectedSession?.id === tab.sessionId ? selectedSession : null);
+    const firstMessage = info?.firstMessage
+      ? (skillExpansionToCommand(info.firstMessage) ?? info.firstMessage).slice(0, 50)
+      : "";
+    return {
+      tab,
+      title: info?.name || firstMessage || tab.sessionId.slice(0, 12),
+      running: runningSessionIds.has(tab.sessionId),
+    };
+  }), [sessionTabs, sessionCatalog, selectedSession, runningSessionIds, translate]);
 
   useEffect(() => {
     setProjectTrust(null);
@@ -1258,7 +1547,7 @@ export function AppShell() {
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onRunningSessionIdsChange={handleRunningSessionIdsChange}
         onSessionsChange={handleSessionsChange}
-        onOpenSettings={() => setSettingsSection(getLastSettingsSection(projectTrustCwd))}
+        onOpenSettings={handleOpenSettings}
         onToggleSidebar={handleSidebarToggle}
       />
     </>
@@ -2050,11 +2339,16 @@ export function AppShell() {
           {!isMobile && (
             <>
               {renderProjectTrustWarning(false)}
-              {/* 状态栏左侧：扩展上报的状态（MCP / LSP …）。
-                  上游把状态放在输入框下方的 shelf 里，这里提到顶栏这一行。 */}
-              <div className="topbar-status">
-                <ExtensionStatusLine statuses={extensionStatuses} />
-              </div>
+              {/* 顶栏这一行的左半段就是会话标签条（取代了原来的扩展状态行）。
+                  每个标签一个会话，或一个空白新会话；多了不换行、横向滚动。 */}
+              <SessionTabBar
+                tabs={sessionTabViews}
+                activeTabId={activeSessionTabId}
+                onSelectTab={handleSelectSessionTab}
+                onCloseTab={handleCloseSessionTab}
+                onNewTab={handleNewSessionTab}
+                onReorder={handleReorderSessionTab}
+              />
               {/* 分支独立成一个按钮，紧贴在 ⋯ 左边。
                   它自带 position:fixed 的下拉，所以不适合混进 ⋯ 菜单（那会引出
                   「菜单必须保持挂载」「下拉高度单独一套」之类的特例）。
@@ -2420,7 +2714,6 @@ export function AppShell() {
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
-              onExtensionStatusesChange={setExtensionStatuses}
               onOpenFile={handleOpenLinkedFile}
               onOpenSession={handleOpenSession}
               onAskInNewChat={handleAskInNewChat}
@@ -2512,17 +2805,20 @@ export function AppShell() {
           flexShrink: 0,
           height: "calc(36px + env(safe-area-inset-top))",
           paddingTop: "env(safe-area-inset-top)",
+          // 全宽时面板是 `position: fixed; inset: 0`，盖住整个窗口，它的左上角就是
+          // 窗口左上角 —— 不避让的话文件标签会顶到 macOS 红绿灯底下。避让量比顶栏大，
+          // 原因见 RIGHT_PANEL_TRAFFIC_LIGHTS_WIDTH。
+          paddingLeft: !isMobile && rightPanelFullWidth && rightPanelOpen ? RIGHT_PANEL_TRAFFIC_LIGHTS_WIDTH : undefined,
           background: "var(--bg-panel)",
           borderBottom: "1px solid var(--border)",
         }}>
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <TabBar
-              tabs={panelTabs}
-              activeTabId={activeFileTabId ?? ""}
-              onSelectTab={setActiveFileTabId}
-              onCloseTab={handleCloseFileTab}
-            />
-          </div>
+          <FileTabStrip
+            tabs={panelTabs}
+            activeTabId={activeFileTabId ?? ""}
+            onSelectTab={setActiveFileTabId}
+            onCloseTab={handleCloseFileTab}
+            onReorder={handleReorderPanelTab}
+          />
           <button
             type="button"
             className="file-panel-expand-button"

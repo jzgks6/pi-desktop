@@ -1,6 +1,7 @@
 # Pi Web - Development Notes
 
-> **This repo is a fork.** It reworks the UI into an IDE-style three-column layout and adds a
+> **This repo is a fork.** It reworks the UI into an IDE-style three-column layout with a
+> browser-style session tab bar in the centre top bar, and adds a
 > macOS desktop shell. `FORK.md` lists every change against upstream (`agegr/pi-web` @ `96966e5`)
 > and how to port them onto a newer upstream. Two rules from it matter for any edit:
 > `app/globals.css` / `app/settings.css` stay byte-identical to upstream (fork styles go in
@@ -126,7 +127,9 @@ lib/
   worktree.ts         project/worktree resolution and git worktree operations
 
 components/
-  AppShell.tsx        layout + URL state + tab management
+  AppShell.tsx        layout + URL state + session-tab state + tab management
+  SessionTabBar.tsx   session tab strip in the centre top bar (horizontal scroll + arrows)
+  FileTabStrip.tsx    right panel's file tab strip (wraps upstream TabBar, hides its native scrollbar)
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
@@ -149,6 +152,9 @@ hooks/
   useDragDrop.ts      shared drag/drop state
   useIsMobile.ts      responsive breakpoint hook
   useTheme.ts         theme state
+  useTabStripScroll.ts  (fork) tab strip scrolling: end arrows, wheel→horizontal, reveal active
+  useTabStripDrag.ts    (fork) drag-to-reorder a tab strip; shared by the session and file strips
+  useDesktopMenuCommands.ts  (fork) native menu events → tab/settings handlers
 ```
 
 ---
@@ -301,6 +307,133 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - OAuth/device-code/manual-code flows are streamed by `GET /api/auth/login/[provider]`; manual code responses POST back with a short-lived token stored in `globalThis.__piLoginCallbacks`.
 - API-key routes store and remove keys through `AuthStorage`. Status endpoints must never return the raw key.
 - The model test route is `app/api/models-config/test/route.ts`; `app/api/models/test/` is not a real route.
+
+### Session tabs in the centre top bar (fork)
+The fork replaces upstream's extension status line at the left of the centre top bar with a
+browser-style tab strip (`components/SessionTabBar.tsx` + `lib/session-tabs.ts`). A tab is either
+an existing session or a blank new-session composer; the list and the active tab persist in
+`localStorage`. Upstream's model is a single `selectedSession`, so the strip is layered on top of
+it: switching a tab drives `selectedSession` / `newSessionCwd` / `newSessionDraftId` and bumps
+`sessionKey`. Four traps, each found the hard way:
+
+- **At most one blank draft tab** (`sessionId === null`), and nothing ever consumes it behind the
+  user's back: `openDraftTab` reuses the existing one (retargeting its cwd) instead of stacking, and
+  `openSessionTab` always opens or focuses its own tab and leaves the blank one alone. A blank tab
+  goes away only when its ✕ is clicked. `parseSessionTabs` collapses multi-draft payloads on read.
+- **The strip is styled after the right panel's `TabBar`** (that is the reference control):
+  full-height tabs at a fixed 180px, inactive `--bg-panel` / active `--bg`, `padding: 0 6px 0 12px`,
+  a 24×24 close button that is revealed on hover (its space stays reserved, so widths never shift).
+  The strip needs `align-self: stretch` to reach full height — the top bar is `align-items: center`,
+  and without it the whole strip shrinks to ~20px and the active tab's background only covers the
+  text ("grey with a white box inside"). The two scroll arrows each keep a 1px separator on the side
+  facing the tabs (the right arrow's `border-left` matters because the tab at the list's right edge
+  is clipped and has no visible right border of its own), and each one **unmounts** at its own end of
+  the strip — not `visibility: hidden` — so reaching an end leaves no empty slot.
+- **Revealing the active tab is driven by an effect plus a `ResizeObserver` — but only when a
+  *tab* resizes, never when the strip itself does.** The scroll arrows unmount once their end is
+  reached (so no space is left behind), and that changes the strip's width; revealing on the strip's
+  own resize then fights the user: the view snaps back to the active tab so the strip can never be
+  parked at the right end ("it never stops scrolling"), and the arrow buttons' smooth scroll gets
+  aborted ~15px in. Keep the `entry.target !== el` filter in the observer callback.
+- **Draft text is keyed per tab, not per cwd.** Drafts live in `lib/draft-store.ts` (an in-memory
+  Map) under `new:<tabId>:<cwd>` and are *parked* under `parked-new:<tabId>` before switching away,
+  because `useAgentSession`'s unmount cleanup calls `clearDraft(activeKey)` — not parking deletes
+  the user's unsent message. `handleSelectSession`, `handleNewSession`, `handleCwdChange` and
+  `restoreWorkspaceContext` all park first.
+- **Tab state is written through to refs** (`applyTabsState`). One event can run several handlers in
+  a row (close a tab → open its right neighbour); state alone is not visible to the second handler
+  until the next render, so it would read the pre-close list and resurrect the closed tab.
+- **A `?cwd=` / `?session=` URL wins over the restored tab list**, but the strip must still end up
+  with a tab that matches what the centre pane shows — otherwise a restored tab looks active while
+  the pane shows the composer, and clicking it does nothing.
+
+Closing a tab only closes the view: the agent keeps running and the session stays in the sidebar.
+The right panel, when expanded to full width, is `position: fixed; inset: 0` and its header
+therefore sits at the window's top-left — it reserves `RIGHT_PANEL_TRAFFIC_LIGHTS_WIDTH` (96, a bit
+wider than the centre top bar's 80) instead of `TRAFFIC_LIGHTS_WIDTH`.
+
+Tabs can be **dragged with the pointer to reorder** (`moveTab` in `lib/session-tabs.ts` +
+`onReorder` on the strip). The listeners go on `window`, not on the tab: reordering makes React move
+the tab node in the DOM, and `setPointerCapture` on a node that gets moved is not guaranteed to
+survive. A drag only starts past a 4px threshold (so plain clicks still work) and swallows the click
+that follows the drop, otherwise releasing the pointer would switch tabs.
+
+**Both strips share one implementation,** `hooks/useTabStripDrag.ts` (the file strip in the right
+panel uses it too, via `components/FileTabStrip.tsx`). It works on **DOM nodes**, not on ids or
+`data-*` attributes: the file tabs are rendered by upstream `TabBar`, which the fork may only extend
+with a className. Two entry points feed the same gesture — per item (`handleItemPointerDown`, the
+session strip) and event delegation (`handleContainerPointerDown`, the file strip, since upstream's
+JSX cannot get an `onPointerDown`). Consequences worth knowing:
+
+- The dragged item's own rect is excluded from the drop computation — it follows the cursor, so its
+  rect is no longer its slot; including it makes the drop land early or not at all.
+- Item positions are measured with `offsetLeft`, never `getBoundingClientRect()`: this is a layout
+  value, unaffected by a running FLIP animation (rects are interpolated mid-flight). **That requires
+  the scroll viewport to be the `offsetParent`** — `.session-tabs-list` / `.file-tabs` therefore carry
+  `position: relative` in `native-theme.css`. Without it `offsetLeft` was measured against `body`
+  (the file strip) or the top bar (the session strip) and the drop index came out hundreds of pixels
+  off — the file strip could not be reordered at all.
+- FLIP uses **WAAPI** (`node.animate`), not CSS transitions: the file tabs' `transition` is an inline
+  value written by upstream (background/color only), and inline styles beat fork CSS, so `transform`
+  cannot be added from the stylesheet. Animation also avoids the old
+  `transition: none` → force reflow → restore dance.
+- The post-drag click is swallowed by a **capture-phase `click` listener on the container**: the file
+  tabs' click handler belongs to upstream and cannot read the fork's suppression flag, so the event has
+  to be stopped before it reaches React's root listener. The session strip keeps its own check too.
+
+The drag feedback is the whole point — without it you cannot tell where the tab will land. The
+dragged tab gets an inline `transform: translateX(cursor − its own slot)` so it sticks to the
+pointer, which leaves its own slot visibly empty as the drop target, and every *other* tab is
+animated with FLIP.
+
+**Measure with `offsetLeft`, never `getBoundingClientRect()`, in that effect.** `offsetLeft` is a
+layout value and is unaffected by transforms; `getBoundingClientRect()` returns the *animated*
+position, so FLIP deltas computed from it drift while a previous transition is still running.
+
+The right panel's file tabs are reordered the same way; the only difference is the plumbing.
+`handleReorderPanelTab` in `AppShell.tsx` maps the drag's `(fromIndex, toIndex)` onto the `fileTabs`
+array by counting how many file tabs precede the drop position — `panelTabs` is `fileTabs`
+concatenated with the terminal tabs, and those two live in separate state arrays, so a drag across the
+boundary simply clamps at the edge of its own group instead of mixing them.
+
+**Dragging must not select text.** The tabs are `user-select: none` and so are the *containers*
+(`.session-tabs` / `.tab-strip`), but that alone is not enough in WKWebView: when a drag starts
+inside a non-selectable subtree, WebKit walks up for the nearest selectable ancestor and anchors the
+selection there, so dragging a tab sideways ends up selecting whatever text the pointer crosses (the
+sidebar's session titles, typically). So `handlePointerDown` also calls `event.preventDefault()` —
+that cancels the selection gesture outright (and the native drag of the label with it). It does
+**not** break clicking a tab; that was verified with real mouse input.
+
+### Tab strip scrolling is shared by two strips (fork)
+The centre session strip and the right panel's file strip scroll identically, and both go through one
+implementation, `hooks/useTabStripScroll.ts` (arrows + wheel→horizontal + reveal-the-active-tab).
+Two strips, one implementation, because the edge cases in there are not obvious:
+
+- `components/FileTabStrip.tsx` wraps upstream's `components/TabBar.tsx`. Upstream lets the tablist
+  itself be the scroll container (`overflow-x: auto`), which draws a **native scrollbar** once tabs
+  overflow — a scrollbar that eats part of the 36px strip and clips the tab labels (the reported
+  bug). The fix hides it in CSS (`.file-tabs { scrollbar-width: none }` + `::-webkit-scrollbar`) and
+  scrolls with the arrows/wheel instead. Upstream `TabBar.tsx` therefore gains exactly one thing:
+  `className="file-tabs"` (FORK.md rule ②). The viewport is located by that selector, because the
+  fork cannot get a ref to an upstream element.
+- The extra `.tab-strip-viewport` wrapper in `FileTabStrip` exists for a reason: `TabBar`'s root
+  carries an inline `flexShrink: 0`, and inline styles beat fork CSS — as a flex child of
+  `.tab-strip` it would refuse to shrink and push the right arrow out of view.
+
+### Desktop menu shortcuts (⌘T / ⌘W / ⌘,) in the native shell
+
+macOS routes those chords to the **application menu first**, so the page never receives a keydown for
+them. They are therefore registered natively in `desktop/src-tauri/src/main.rs` (`build_menu`), which
+replaces Tauri's default menu. All three just `eval` a `CustomEvent` into the focused window
+(`pi-desktop:new-tab` / `close-tab` / `settings`), which `hooks/useDesktopMenuCommands.ts` maps onto
+the existing handlers — no `@tauri-apps/api` dependency on the web side, and the whole contract is
+three event-name strings (keep both sides in sync).
+
+**⌘W is a tab action and must never touch the window.** Tauri's default menu binds ⌘W to Close
+Window, so the custom menu simply omits that item — with two ⌘W accelerators the winner would be
+undefined. The red button still hides the window (the app deliberately keeps running in the
+background). The **Edit menu has to stay** too: cut/copy/paste/select-all inside the web view are
+forwarded through it, so dropping it breaks ⌘C/⌘V/⌘A in the composer.
 
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` as `pi-sound-enabled` and reuses one `AudioContext`.

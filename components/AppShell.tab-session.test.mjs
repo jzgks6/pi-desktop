@@ -34,7 +34,7 @@ test("New session is remembered as this tab's selection", () => {
   const start = source.indexOf("  const handleNewSession = useCallback");
   const end = source.indexOf("  // Global keyboard shortcuts", start);
   const body = source.slice(start, end);
-  assert.match(body, /router\.replace\(`\?cwd=\$\{encodeURIComponent\(cwd\)\}`/);
+  assert.match(body, /router\.replace\(`\?cwd=\$\{encodeURIComponent\(draftTab\.cwd\)\}`/);
 });
 
 test("deleting the current session forgets its tab memory", () => {

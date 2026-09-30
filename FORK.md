@@ -1,13 +1,15 @@
 # FORK.md —— 相对上游做了哪些改动，以及上游更新后怎么移植
 
 上游：`https://github.com/agegr/pi-web`，本 fork 的基线是 **`96966e5`**。
-下面这份清单是 `git diff 96966e5 <当前版本>` 的实际结果：**39 个文件**（+7522 / −1646）。
+下面这份清单的规模用这条命令量（几个新增文件还未跟踪，所以手工加上了行数）：
+`git diff --stat 96966e5` → **68 个文件**（+9934 / −2127），加上 7 个新增文件共 1504 行 →
+**75 个文件**（+11438 / −2127）。
 
 > **当前状态**：本 fork 的 `main` 已经压在上游 `433d09e` 之上（比基线多
-> `fd037e4` / `6a1246e` / `433d09e` 三个提交，均已完整保留），这份改动作为一个提交叠在它们上面。
+> `fd037e4` / `6a1246e` / `433d09e` 三个提交，均已完整保留），这份改动叠在它们上面。
 > 上游再更新时，按第五节把这里的改动重新叠一次。
 
-改动性质：把界面改成 IDE 式三栏、加一个 macOS 桌面外壳。**没有动任何业务逻辑**
+改动性质：把界面改成 IDE 式三栏 + 顶栏会话标签条、加一个 macOS 桌面外壳。**没有动任何业务逻辑**
 （会话、agent、RPC、工具调用这些一行没改）。
 
 ---
@@ -34,10 +36,16 @@
 | --- | --- |
 | `app/native-theme.css` | **fork 的全部样式**（左栏、顶栏、统计行、弹窗、会话行菜单…） |
 | `lib/context-stats.ts` | 上下文统计的纯函数：`compactTokens` / `computeContextStats` / `contextStatsParts` |
+| `lib/session-tabs.ts` | 会话标签的纯函数 + `localStorage` 读写：标签的开关 / 去重 / 转正 / 关闭，草稿按标签隔离的键（`draftKeyForTab` / `parkedDraftKeyForTab`），以及「最多一个空白草稿标签」的折叠规则（空白标签一旦打开就不会被别处收掉） |
+| `components/SessionTabBar.tsx` | 中栏顶栏左端的会话标签条：横向滚动 + 两侧滚动按钮（只在那一侧还有内容时出现）+ 右侧 `+`，标签带运行中呼吸点与关闭按钮；标签可按住左右拖拖动排序。尺寸 / 配色照右栏的 `TabBar`；滚动行为与会话标签条共用 `hooks/useTabStripScroll.ts` |
+| `hooks/useTabStripScroll.ts` | 一条横向标签栏的滚动行为：两侧箭头、滚轮映射成横向滚动、活动项自动进视野。会话标签条与右栏文件标签条共用（两个地方的边界条件很容易各自跑偏） |
+| `hooks/useTabStripDrag.ts` | 同一个横向标签栏的「按住拖动排序」：被拖的贴着指针走、其它项 FLIP 滑到新位置、拖完吞掉那一下 click。按 **DOM 节点** 而不是 id 工作（右栏标签是上游渲染的，加不了 `data-*`），且同时支持「逐项绑定」与会话标签条和「事件委托」（右栏）两种入口；FLIP 用 WAAPI，因为右栏的 `transition` 是上游的 inline 值，fork 加不进 `transform` |
+| `components/FileTabStrip.tsx` | 右栏头部的文件标签条：把上游 `TabBar` 包一层两端滚动按钮，隐掉上游自己画的那条**原生滚动条**（它占高度、会把文件标签标题裁掉），并接上与会话标签条同一套的**拖动排序**。上游 `TabBar.tsx` 只多了一个 `className="file-tabs"` |
+| `hooks/useDesktopMenuCommands.ts` | 按桌面壳原生菜单发过来的 CustomEvent（`pi-desktop:new-tab` / `close-tab` / `settings`），转成已有的 handler。不引 Tauri 的 JS API，浏览器里是纯 no-op |
 | `components/ChatContextStats.tsx` | 输入框下方中间槽那一行：圆环 + 百分比 + 总 token + 缓存 + 花费 |
 | `components/ContextUsageRing.tsx` | 从上游移植的圆环，加了 `decorative` 模式（避免 button 嵌套 button） |
 | `design-prototypes/sessions-sidebar.html` | 左栏的设计稿（仅存档，无代码作用） |
-| `desktop/`（7 个文件） | macOS 外壳：Tauri 工程 + 启动页 + 说明，详见 `desktop/README.md` |
+| `desktop/`（7 个文件） | macOS 外壳：Tauri 工程 + 启动页 + 说明，详见 `desktop/README.md`。`src/main.rs` 里还建了一份应用菜单，注册三个原生快捷键：**⌘T** 新建空白会话标签、**⌘W** 关闭当前标签、**⌘,** 打开设置。三者都只把命令 `eval` 成 CustomEvent 交给网页（见 `hooks/useDesktopMenuCommands.ts`）。菜单里**不能**再放「关闭窗口」（默认菜单那个 ⌘W 必须拿掉，否则两个 ⌘W 打架；现在 ⌘W 完全不碰窗口）；编辑菜单必须留着，否则输入框里的 ⌘C/⌘V/⌘A 会失效 |
 | `scripts/package-desktop.mjs` | 打包脚本：组装运行时 → 裁剪 → `cargo tauri build` → 启动验证 |
 | `reference/README.md` | 参考副本的说明（副本本身被 `.gitignore` 排除） |
 
@@ -48,13 +56,14 @@
 | 文件 | 改动量 | 改了什么 |
 | --- | --- | --- |
 | `components/SessionSidebar.tsx` | +285 / −250 | ① 会话/文件切成一个切换器（复用既有 `explorerOpen`，没加 state）② 新建会话满宽按钮 ③ 常驻搜索框（原来是点图标才展开）④ 项目分区标题 ⑤ 会话项的悬停按钮收进 ⋯ 菜单 ⑥ 标题超长才渐隐（`useOverflowingText` 实测 `scrollWidth`）⑦ 顶栏行（设置齿轮 + 收起侧栏） |
-| `components/AppShell.tsx` | +201 / −127 | ① 三栏布局与顶栏那一行「兼作状态栏」② ⋯ 菜单（复用上游 `renderChatToolbarActions`）③ 信息面板只在中间弹出（几何按中间列矩形算）④ 脚本侧栏开关只在收起后出现 ⑤ 收起时让开红绿灯宽度 ⑥ 设置入口改为左栏齿轮 |
+| `components/TabBar.tsx` | +1 | 只加了一个 `className="file-tabs"`（铁律 2 里「加 className」那一半）。右栏文件标签条外面由 `components/FileTabStrip.tsx` 包一层，原生滚动条由 `native-theme.css` 的 `.file-tabs` 隐掉；上游那个 inline 的 `overflow-x: auto` **没动**，仍然是滚动视口本身 |
+| `components/AppShell.tsx` | +506 / −195 | ① 三柱布局与顶栏那一行 ② **顶栏左端是会话标签条**（取代上游的扩展状态行），见下 ③ ⋯ 菜单（复用上游 `renderChatToolbarActions`）④ 信息面板只在中间弹出（几何按中间列矩形算）+ 全宽展开时为红绿灯留位 ⑤ 脚本侧栏开关只在收起后出现 ⑥ 收起时让开红绿灯宽度 ⑦ 设置入口改为左栏齿轮 |
 | `components/ChatWindow.tsx` | +57 / −124 | ① 删掉空会话头部的品牌行（logo + Pi Web + 版本号）② 扩展弹窗标题区改为「可收缩 + 40vh 硬上限」③ 消息列表加 `.chat-scroll-area`（常显滚动条）④ 删掉地图的引用 |
-| `components/ExtensionStatusBar.tsx` | +26 / −15 | 抽出 `ExtensionStatusLine` 单独导出，供顶栏复用（仍只有一份实现） |
+| `components/ExtensionStatusBar.tsx` | +26 / −15 | 抽出 `ExtensionStatusLine` 单独导出（仍只有一份实现）。**fork 起初把它放在中栏顶栏，现在那里改成了会话标签条，所以 `ExtensionStatusLine` 在 app 里已不再被渲染** —— 组件与 `ChatWindow` 上报 `extensionStatuses` 的那条链都留着，要重新露出（例如收进 ⋯ 菜单）不必复现数据流 |
 | `components/ChatInput.tsx` | +17 / −3 | ① 控制条中间槽从空 spacer 变成真居中槽（`contextSlot`）② 去掉为地图留的 `paddingRight: 52` |
 | `components/BranchNavigator.tsx` | +10 / −2 | ① 图标配色跟「是否展开」而不是「是否有内容」② 下拉高度上限 `min(520px, 可视剩余空间)` |
 | `components/MessageView.tsx` | ≈0 | 净改动为零（流式 token 统计删掉后又按需恢复），只有 2 条 `SAFETY:` 注释 |
-| `lib/i18n/messages/{zh-CN,en,zh-TW}.ts` | +7 / −2 | 新增 6 个 key（`sidebar.viewSessions` `viewFiles` `newSession` `projects` `moreActions`、`session.cacheHitShort`、`chat.ctxUsage`）；删掉 2 个地图 key |
+| `lib/i18n/messages/{zh-CN,en,zh-TW}.ts` | +12 / −2 | 新增 6 个 key（`sidebar.viewSessions` `viewFiles` `newSession` `projects` `moreActions`、`session.cacheHitShort`、`chat.ctxUsage`）+ 3 个 `sessionTab.*` key + 2 个 `tabStrip.*` key（两条标签条共用的滚动按钮文案）；删掉 2 个地图 key |
 | `app/layout.tsx` | +3 | 引入 `native-theme.css` |
 | `.gitignore` / `eslint.config.mjs` / `AGENTS.md` | 小 | 忽略规则（含打包产物）、lint 忽略 `desktop/src-tauri/{runtime,target,gen,icons}`、文档 |
 | 7 个 `*.test.mjs` | 小 | 断言随 UI 结构更新 |
@@ -77,7 +86,7 @@
    - `bin/pi-web.js` 的 CLI（`-p` / `--no-open`）与 `.next` 的目录约定没变；
    - `tauri.conf.json` 的 `productName`、`bundle.resources: ["runtime/"]` 仍在；
    - `main.rs` 里对 `runtime/app/...` 的路径假设仍成立。
-6. **跑门禁**：`npx tsc --noEmit` → 0、`npx eslint .` → 0、`npm test`（1304 项）。
+6. **跑门禁**：`npx tsc --noEmit` → 0、`npx eslint .` → 0、`npm test`（1349 项）。
    界面上还有几条要人眼看的：红绿灯位置、左栏观感、滚动条。
 
 ## 六、容易踩的坑（都是踩过的）
@@ -94,8 +103,10 @@
 - **红绿灯位置在 `desktop/src-tauri/src/main.rs`**，`traffic_light_position` 的第二个参数
   **不是「距顶部的距离」**：AppKit 左下原点、tao 只改按钮的 X，所以该值使按钮整体下移，
   斜率正好 1。当前标定与历史写在代码注释里。
-- **打包脚本的两道闸别删**：① 组装运行时不会被别的开关顺带跳过（只能用 `--reuse-runtime` 显式要求）；
-  ② 运行时的 `.next/BUILD_ID` 必须与仓库一致。两条都是「app 里跑的是旧构建」之后加的。
+- **打包脚本的三道闸别删**：① 组装运行时不会被别的开关顺带跳过（只能用 `--reuse-runtime` 显式要求）；
+  ② 运行时的 `.next/BUILD_ID` 必须与仓库一致；③ **node 必须按「复制到 `runtime/bin/` 之后
+  仍能跑」验收**（homebrew 的 node 26+ 是共享库构建，原地跑得好好的，单独复制就 dyld 缺库，
+  包能打出来但 app 永远停在启动页）。三条都是「app 里跑的不是这份源码」之后加的。
 - **改 `productName` 后 `cargo tauri build` 不会删旧包**，`bundle/macos` 下会新旧并存；
   按名字挑产物的地方（含脚本的验证步）可能挑到旧的，脚本现在会自动清掉。
 
@@ -189,7 +200,7 @@ git merge --continue     # 完成这次合并（沿用自动生成的那条信�
 
 ---
 
-## 八、和上游保持一致的三个取舍点
+## 八、和上游保持一致的几个取舍点
 
 这几处是**有意偏离上游**的，移植时不要「顺手改回去」：
 
@@ -199,3 +210,30 @@ git merge --continue     # 完成这次合并（沿用自动生成的那条信�
 3. **四主题里只重绘了 light / dark**；`mist` / `rose` / `pine` 保留各自的调色板，
    只从 `:root` 拿结构令牌（圆角、行高、字号）。`native-theme.css` 里的选择器写成
    `html.dark[data-theme="dark"]` 就是为了不去覆盖那三套。
+4. **中栏顶栏左端是会话标签条**（上游那里是扩展状态行，没有标签概念）。
+   几条移植时容易改错的行为：
+   - **全应用最多一个空白草稿标签**（`sessionId === null` 的那个），`+` 只会复用 / 聚焦它，
+     不会叠出第二个。存储层也会把多草稿的旧数据折叠成一个（`parseSessionTabs`）。
+   - **空白标签不会被别处悄悄收掉**：`openSessionTab` 一律另开 / 跳转，从不占用或关闭空白标签；
+     空白页只由用户点 ✕ 关掉。
+   - **标签外观与右栏文件标签（`components/TabBar.tsx`）同一套**：整高标签、固定 180px 宽、
+     非活动 `--bg-panel` / 活动 `--bg`、左 12 右 6 的内边距、悬停才显形的 24×24 关闭按钮
+     （位置一直占着，所以宽度不跳）。会话标签条必须 `align-self: stretch` 才能拉满顶栏高度 ——
+     顶栏是 `align-items: center`，不拉满时整条只有约 20px 高，活动标签的白底会缩在文字周围，
+     看起来是「灰底嵌白底」。两端滚动箭头朝标签那一侧都有一条 1px 竖线；右边那个的 `border-left`
+     是必需的，因为列表右端那个标签是被裁掉的，自己那条右边框不在可见范围内。箭头**划到
+     自己那端就卸载**（不是 `visibility: hidden`），所以到头不会空出一段位置。
+   - **反过来，箭头显隐会改变列表宽度**（卸载 = 多出 26px）。而「该不该显箭头」正是由滚动位置
+     算出来的，所以**不能在整条列表 resize 时去滚回活动标签**，否则自激：滚轮到右端 → 箭头卸载 →
+     列表变宽 → 又拽回活动标签 → 永远划不到头；同时也会打断箭头按钮自己的平滑滚动（只挪十几
+     像素就停）。reveal 只跟「活动标签变了 / 标签增删」和**标签自身**尺寸变化走（observer 回调里
+     的 `entry.target !== el` 过滤）。
+   - **全宽展开的右栏要给红绿灯留位**：`right-panel-full-width` 是 `position: fixed; inset: 0`，
+     它的头部就是窗口左上角，和中栏顶栏一样需要 `paddingLeft: TRAFFIC_LIGHTS_WIDTH`。
+   - **草稿按标签隔离**：草稿键是 `new:<标签id>:<cwd>`，切走时停放到 `parked-new:<标签id>`
+     （上游是按 cwd 停放一个）。上游 `useAgentSession` 卸载时会 `clearDraft(活动键)`，
+     所以**切标签前必须先停放**，否则用户没发出去的正文会没。
+   - **标签列表要同时写 state 和 ref**（`applyTabsState`）：同一个事件里会连着走几个 handler
+     （关标签 → 打开右邻居），只写 state 的话第二个 handler 读到的是关之前的列表，会把刚关掉的标签加回来。
+   - **链接里带 `?cwd=` / `?session=` 时 URL 优先**，但标签条必须补上一个和中间内容对得上的标签，
+     否则恢复出来的列表里会有一个「看着是活动标签、点下去却没反应」的死标签。

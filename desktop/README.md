@@ -30,6 +30,22 @@ runtime/
 → 拉起 `node bin/pi-web.js -p <port> --no-open` → 先把启动页显示出来 → 等服务开始监听
 → 把窗口导航过去。关窗口只是隐藏（macOS 习惯），⌘Q 或程序坞「退出」才收掉服务。
 
+### 原生菜单与快捷键
+
+macOS 把 ⌘T / ⌘W / ⌘, 这类组合先交给**应用菜单**，网页根本收不到 keydown，所以它们在
+`main.rs` 的 `build_menu` 里注册（整份菜单是自建的，Tauri 默认那份被换掉了）。三个菜单项都
+只把命令 `eval` 成 CustomEvent 丢给聚焦窗口（`pi-desktop:new-tab` / `close-tab` / `settings`），
+由 `hooks/useDesktopMenuCommands.ts` 接上网页已有的 handler —— 桌面壳与网页之间只有这三个
+事件名字符串的约定，网页侧不引 `@tauri-apps/api`（浏览器里是纯 no-op）。
+
+两条不能忘的约束：
+
+- **⌘W 只能关标签，绝不能碰窗口**：自建菜单里**故意没有**「关闭窗口」那一项（Tauri 默认菜单
+  是把 ⌘W 绑给关窗口的），否则两个加速键打架。窗口只能靠红灯收起或 ⌘Q 退出。
+- **编辑菜单必须留着**：WebView 里的剪切/拷贝/粘贴/全选是靠它转发的，删了输入框就不能粘贴。
+
+菜单文案是写死的中文（原生菜单在启动时就建好了，拿不到网页的 i18n）。
+
 ## 打包
 
 ```bash
@@ -39,12 +55,30 @@ node ../scripts/package-desktop.mjs --skip-build   # 复用现有 .next
 
 产物在 `src-tauri/target/release/bundle/macos/pi desktop.app`。
 
-脚本里有两个闸，都是踩过坑之后加的：
+脚本里有三个闸，都是踩过坑之后加的：
 
 1. **组装运行时不会被别的开关顺带跳过** —— 只能用 `--reuse-runtime` 显式要求。
    （曾经 `--verify` 会顺手跳过组装，结果 app 里塞的是上一版 `.next`，
    源码里已删除的组件在 app 里还活着。）
 2. **运行时的 `.next/BUILD_ID` 必须与仓库一致**，否则直接报错退出。
+3. **node 必须按「复制到 `runtime/bin/` 之后仍然能跑」来验收**，候选不达标就顺延到下一个。
+
+第 3 条是血的教训：homebrew 的 **node 26+ 是共享库构建** —— `/opt/homebrew/bin/node` 只
+132 KB，实现全在 `@rpath/libnode.147.dylib`（还挂着 `/opt/homebrew/opt/{libuv,llhttp,abseil…}`
+一堆绝对路径）。这种候选**原地跑 `--version` 完全正常**，但 `copyFileSync` 单独拿出来就
+`dyld: Library not loaded`。当时脚本只看原路径，于是包照打不误（1.29 GiB，看着挺正常），
+app 却永远停在启动页 —— 因为 Rust 壳拉起的 node 秒崩，端口一直不监听。
+
+这台机器上唯一能用的独立 node 是旧包里的 v24.14.1（只依赖系统框架）。所以重新打包要显式指定：
+
+```bash
+cp "/Applications/pi desktop.app/Contents/Resources/runtime/bin/node" ~/Library/Caches/pi-desktop/node
+PI_DESKTOP_NODE=~/Library/Caches/pi-desktop/node node scripts/package-desktop.mjs
+```
+
+（不指定就会在验收那步报错退出，并在错误里附上这两行 —— 总比又打出个坏包好。）
+`.next` 那边同理丢掉了 `/dev`：跑过 `next dev` 之后它能有 739M，而 `next build` 不会清它，
+曾经把包从 695M 撑到 1.29 GiB。
 
 关于签名：产物是**链接器签名（linker-signed adhoc）**，没有 `_CodeSignature` 资源封印，
 所以 `codesign --verify` 会报 `code has no resources but signature indicates they must be present`

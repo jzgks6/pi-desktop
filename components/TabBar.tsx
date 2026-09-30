@@ -33,6 +33,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
   return (
     <div
       role="tablist"
+      className="file-tabs"
       style={{
         display: "flex",
         alignItems: "flex-end",

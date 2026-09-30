@@ -420,31 +420,237 @@ html.dark {
 }
 
 /* ===========================================================================
- * 顶栏那一行兼作状态栏
+ * 中栏顶栏的会话标签条
  *
- * 上游：扩展状态在输入框下方的 shelf 里，工具按钮平铺在顶栏上。
- * 现在：左 = 扩展状态（MCP / LSP …），右 = 工具收进 ⋯ 菜单 + todo 入口。
+ * 取代了原来的扩展状态行（`.topbar-status` + ExtensionStatusLine）：顶栏这一行
+ * 现在左 = 会话标签（每个标签一个会话，或一个空白新会话），右 = 分支 / ⋯ / 文件开关。
+ *
+ * 标签多了**不换行、不压缩**，整条横向滚动；只在那一侧真的还有内容时才出现的
+ * 滚动按钮补上「WKWebView 里看不见 overlay 滚动条」这一点。
+ *
+ * 尺寸 / 配色与右栏文件标签（`components/TabBar.tsx`）同一套：整高标签、
+ * 非活动 `--bg-panel` / 活动 `--bg`、左 12 右 6 的内边距、24×24 常显关闭按钮。
+ * **`.session-tabs` 必须 `align-self: stretch`** —— 顶栏是 `align-items: center`，
+ * 不拉满的话整条只有内容高度（约 20px），活动标签的白底就只在文字周围一小块，
+ * 看起来像「灰底嵌白底」。
  * ========================================================================= */
-.topbar-status {
+.session-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-self: stretch;
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  /* 标签自己已经是 user-select: none；容器也标上是为了抽掉 WebKit 的退路：
+     从不可选区域起手拖拽时，它会往上找最近的可选祖先当锚点，
+     结果把划过的文字（侧栏会话标题之类）选蓝。拖拽本身还靠
+     SessionTabBar 里 pointerdown 的 preventDefault 兜底。 */
+  user-select: none;
+}
+
+.session-tabs-list {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
-  align-items: center;
-  padding: 0 10px;
-  overflow: hidden;
-  font-size: 11px;
-  color: var(--text-dim);
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* 滚动由滚轮 / 触控板 / 两侧按钮承担，滚动条本身不占高度也不显示。 */
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+  /* 让视口自己成为 offsetParent：拖动排序靠 `offsetLeft` 量各项位置（它是布局值，
+     不受正在跑的 FLIP 动画影响），而 `offsetLeft` 是相对 offsetParent 的。
+     不钉住的话它可能量到顶栏 / body，算出来的落点会整体偏一大截。 */
+  position: relative;
 }
 
-.topbar-status .extension-status-line {
+.session-tabs-list::-webkit-scrollbar {
+  display: none;
+}
+
+/* 单个标签。宽度**固定**（所有标签一样长，不随标题长短变化），超长标题省略号收尾。
+   高度靠父级 stretch 拉满顶栏。 */
+.session-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  width: 180px;
+  padding: 0 6px 0 12px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  /* transform 那条是给重排的滑动动画（FLIP）用的，见 SessionTabBar。 */
+  transition: background 0.12s, color 0.12s, transform 0.16s ease;
+}
+
+.session-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.session-tab.is-active {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.session-tab-title {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* --- todo 等扩展组件的入口 --- */
+/* 拖动中的标签：**贴着指针走**（inline transform），它让出来的那个同宽空位就是落点。
+   所以这里不能再带 transform 过渡，否则它会拖在指针后面。z-index 在 flex item 上
+   不用配合 position 也生效。
 
+   右栏文件标签条那条走同一套（类由 hooks/useTabStripDrag.ts 直接挂到节点上）：
+   它的 `transition` 是上游写的 inline 值，本来就不带 transform，所以只管底色与阴影。 */
+.session-tab.is-dragging {
+  z-index: 3;
+  background: var(--bg-selected);
+  color: var(--text);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3);
+  cursor: grabbing;
+  transition: background 0.12s, color 0.12s;
+}
+
+.file-tabs [role="tab"].is-dragging {
+  z-index: 3;
+  background: var(--bg-selected);
+  color: var(--text);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3);
+  cursor: grabbing;
+}
+
+/* 运行中呼吸点。 */
+.session-tab-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: session-tab-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes session-tab-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-tab-dot { animation: none; }
+  .session-tab { transition: none; }
+}
+
+/* 关闭按钮：位置一直占着（标签宽度因此稳定），**只在悬停 / 键盘聚焦时显形**。 */
+.session-tab-close {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+.session-tab:hover .session-tab-close,
+.session-tab-close:focus-visible {
+  opacity: 1;
+}
+
+.session-tab-close:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 两端滚动按钮（会话标签条与右栏文件标签条共用）。 */
+.tab-strip-scroll,
+.session-tabs-new {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.tab-strip-scroll {
+  width: 26px;
+  border-right: 1px solid var(--border);
+}
+
+/* 左边那个 ‹ 靠 border-right 和标签分开；右边那个 › 紧跟在标签列表后面，而列表
+   右端那个标签是被裁掉的（自己那条右边框不在可见范围内），所以要在 › 的左岸
+   补一条同样的竖线，两边才对称。 */
+.tab-strip-scroll.is-right {
+  border-left: 1px solid var(--border);
+}
+
+.session-tabs-new {
+  width: 30px;
+}
+
+.tab-strip-scroll:hover,
+.session-tabs-new:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* --- 右栏头部的文件标签条（上游 TabBar 外面套的滚动壳）--- */
+
+/* 滚动视口就是 TabBar 自己的根元素（fork 只给它加了这一个 className）。
+   上游让它 overflow-x: auto，于是标签一多它就画一条**系统滚动条** —— 那条滚动条
+   是有高度的，会把下面那行文件标题（路径 · 行数 · 大小）整行往下挤。这里把滚动条
+   隐掉，改由两侧的箭头和滚轮来滚（行为与会话标签条同一份实现：
+   components/FileTabStrip.tsx + hooks/useTabStripScroll.ts）。 */
+.file-tabs {
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+  /* 同 .session-tabs-list：让视口成为 offsetParent，拖动排序量位置才准
+     （上游把它当滚动容器用，offsetParent 本来会落到 body 上）。 */
+  position: relative;
+}
+
+.file-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab-strip {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  /* 同 .session-tabs：不给 WebKit 留下「往上找可选祖先」的机会。 */
+  user-select: none;
+}
+
+/* 中间这层存在的唯一理由：让 TabBar 的根元素保持「块级、宽度 = 容器宽」。
+   它自带 inline 的 flex-shrink: 0，直接当 .tab-strip 的 flex 子项会拒绝收缩、
+   把右侧箭头挤出可视区；而 inline style 是覆盖不掉的（FORK.md 的改法也要求
+   给上游加东西而不是改它的样式），所以中间垫一层。 */
+.tab-strip-viewport {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 
 
 

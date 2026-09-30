@@ -255,9 +255,14 @@ test("stale fresh-session completion cannot replace the active composer", () => 
     appShellSource.indexOf("  const handleAgentEnd = useCallback"),
   );
 
-  assert.match(newSessionSource, /const draftKey = `new:\$\{sessionId\}:\$\{cwd\}`/);
-  assert.match(newSessionSource, /activeNewSessionDraftKeyRef\.current = draftKey/);
-  assert.match(createdSource, /activeNewSessionDraftKeyRef\.current !== sourceDraftKey/);
+  assert.match(newSessionSource, /activeNewSessionDraftKeyRef\.current = draftKeyForTab\(draftTab\.id, draftTab\.cwd\)/);
+  // 草稿标签必须还在、而且还处于草稿状态；后台转正（wasActive 为 false）不得抢视图。
+  assert.match(
+    createdSource,
+    /sessionTabsRef\.current\.find\(\s*\(tab\) => tab\.id === draftTabId && tab\.sessionId === null,\s*\)/,
+  );
+  assert.match(createdSource, /const wasActive = activeSessionTabIdRef\.current === draftTabId;/);
+  assert.match(createdSource, /if \(!wasActive\) return;/);
   assert.match(cwdChangeSource, /const currentFreshCwd = newSessionCwd \?\? activeCwd/);
   assert.match(
     cwdChangeSource,
@@ -269,7 +274,11 @@ test("stale fresh-session completion cannot replace the active composer", () => 
     /useLayoutEffect\(\(\) => \{\s*activeNewSessionDraftKeyRef\.current = newSessionDraftKey;/,
   );
   assert.ok(
-    createdSource.indexOf("activeNewSessionDraftKeyRef.current !== sourceDraftKey")
+    createdSource.indexOf("const wasActive = activeSessionTabIdRef.current === draftTabId")
+      < createdSource.indexOf("setSelectedSession(session)"),
+  );
+  assert.ok(
+    createdSource.indexOf("if (!wasActive) return;")
       < createdSource.indexOf("setSelectedSession(session)"),
   );
 });

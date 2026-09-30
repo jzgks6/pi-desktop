@@ -235,40 +235,78 @@ function stepBuild() {
  * 版本门槛用 bin/node-version.js 里那份，不在这里再写一遍 ——
  * app 启动时就是按那个门槛拦截的，两边必须一致。
  */
-function resolveNodeBinary() {
-  const rejected = [];
-  const candidates = [
+function nodeCandidates() {
+  return [
     process.env.PI_DESKTOP_NODE,
     process.execPath,
     "/opt/homebrew/bin/node",
     "/usr/local/bin/node",
   ].filter((candidate) => typeof candidate === "string" && candidate.length > 0);
+}
 
-  for (const candidate of candidates) {
-    if (candidate.includes(".app/Contents/") || candidate.includes("src-tauri/runtime")) {
-      rejected.push(`${candidate}（在 app 包里）`);
+/** 候选在本地的可用性检查；通过则返回 { path, version }，否则返回一句排除理由。 */
+function checkNodeCandidate(candidate) {
+  if (candidate.includes(".app/Contents/") || candidate.includes("src-tauri/runtime")) {
+    return `${candidate}（在 app 包里）`;
+  }
+  if (!existsSync(candidate)) {
+    return `${candidate}（不存在）`;
+  }
+  let version;
+  try {
+    version = execFileSync(candidate, ["--version"], { encoding: "utf8" }).trim();
+  } catch (err) {
+    return `${candidate}（跑不起来：${err?.message ?? err}）`;
+  }
+  if (!isNodeVersionSupported(version)) {
+    return `${candidate}（${version} 低于 ${MIN_NODE_VERSION}）`;
+  }
+  return { path: candidate, version };
+}
+
+/**
+ * 把选中的 node 装到 dest，并**按复制出来那份验收**。
+ *
+ * 踩过的坑：homebrew 的 node 26 是共享库构建 —— `/opt/homebrew/bin/node` 只有
+ * 132 KB，真正的实现在 `@rpath/libnode.147.dylib` 里（还挂着 libuv / llhttp / abseil
+ * 一堆 `/opt/homebrew/opt/...` 绝对路径）。这种候选**原地跑 `--version` 完全正常**，
+ * 但单独 copyFileSync 出来就 dyld 报缺库。当时本函数只看原路径，于是包照打不误，
+ * app 却在启动页永远等下去（Rust 壳拉起的 node 秒崩、端口一直不监听）。
+ * 所以验收必须在**目标位置**做，失败的候选直接顺延到下一个。
+ */
+function installNodeBinary(dest) {
+  const rejected = [];
+  for (const candidate of nodeCandidates()) {
+    const checked = checkNodeCandidate(candidate);
+    if (typeof checked === "string") {
+      rejected.push(checked);
       continue;
     }
-    if (!existsSync(candidate)) {
-      rejected.push(`${candidate}（不存在）`);
-      continue;
-    }
-    let version;
+    copyFileSync(checked.path, dest);
+    chmodSync(dest, 0o755);
     try {
-      version = execFileSync(candidate, ["--version"], { encoding: "utf8" }).trim();
+      const version = execFileSync(dest, ["--version"], { encoding: "utf8" }).trim();
+      return { path: checked.path, version };
     } catch (err) {
-      rejected.push(`${candidate}（跑不起来：${err?.message ?? err}）`);
-      continue;
+      const detail = String(err?.stderr ?? err?.message ?? err)
+        .split("\n")
+        .map((line) => line.trim())
+        .find((line) => line.length > 0);
+      rejected.push(`${checked.path}（复制出来跑不起来：${detail ?? "未知错误"}）`);
+      rmSync(dest, { force: true });
     }
-    if (!isNodeVersionSupported(version)) {
-      rejected.push(`${candidate}（${version} 低于 ${MIN_NODE_VERSION}）`);
-      continue;
-    }
-    return { path: candidate, version };
   }
 
   throw new Error(
-    `找不到可用的 node 二进制。可以用 PI_DESKTOP_NODE=<path> 指定。已排除：${rejected.join("、")}`,
+    [
+      "找不到能用的 node 二进制。",
+      "要求是「单独复制出来仍然能跑」的独立二进制（只依赖系统框架）。",
+      "homebrew 的 node 26+ 是共享库构建（@rpath/libnode.*.dylib + 一堆",
+      "/opt/homebrew/opt/... 绝对路径），复制单个文件必然缺库；遇到过就绕开它：",
+      "  cp \"<某个能跑的 node>\" ~/Library/Caches/pi-desktop/node",
+      "  PI_DESKTOP_NODE=~/Library/Caches/pi-desktop/node node scripts/package-desktop.mjs",
+      `已排除：${rejected.join("、")}`,
+    ].join("\n"),
   );
 }
 
@@ -288,9 +326,7 @@ function stepAssemble() {
   // 1) node：拿一份干净的、非 app 包内的 node（只依赖系统框架的独立二进制）
   const nodeDir = join(RUNTIME, "bin");
   mkdirSync(nodeDir, { recursive: true });
-  const { path: nodeSrc, version: nodeVersion } = resolveNodeBinary();
-  copyFileSync(nodeSrc, join(nodeDir, "node"));
-  chmodSync(join(nodeDir, "node"), 0o755);
+  const { path: nodeSrc, version: nodeVersion } = installNodeBinary(join(nodeDir, "node"));
   log(`node        ${nodeSrc} (${nodeVersion}) → runtime/bin/node`);
 
   // 2) 启动器与包元数据
@@ -299,15 +335,18 @@ function stepAssemble() {
   log("bin/ package.json");
 
   // 3) 构建产物：只丢 cache —— 那 536M 是构建期缓存，运行时用不到；
-  //    trace / trace-build / diagnostics / types 同理，只有分析工具会读。
+  //    trace / trace-build / diagnostics / types 同理，只有分析工具会读；
+  //    dev 是 `next dev` 留下的开发产物（跑过 dev server 后能到 739M，
+  //    而且 next build 不会替我们清掉它）。
   copyTree(join(REPO, ".next"), join(APP_DIR, ".next"), [
     "--exclude=/cache",
+    "--exclude=/dev",
     "--exclude=/trace",
     "--exclude=/trace-build",
     "--exclude=/diagnostics",
     "--exclude=/types",
   ]);
-  log(".next/ (已剔除 cache 等构建期目录)");
+  log(".next/ (已剔除 cache / dev 等构建期目录)");
 
   // 4) 静态资源
   copyTree(join(REPO, "public"), join(APP_DIR, "public"));
