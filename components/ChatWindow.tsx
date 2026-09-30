@@ -2,10 +2,10 @@
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { AgentMessage, AgentUsage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionStatusItem, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
+import type { AgentMessage, AgentUsage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionStatusItem, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { normalizeCustomPanelLines } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, isAssistantTruncated, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, hasAssistantAnswer, isAssistantTruncated, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { buildQuotedSelection } from "@/lib/quoted-selection";
 import { MessageView } from "./MessageView";
@@ -14,7 +14,8 @@ import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatContextStats } from "./ChatContextStats";
 import { AnsiText } from "./AnsiText";
 import { useI18n } from "@/hooks/useI18n";
-import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
+import { phaseLabel } from "@/lib/chat-phase-label";
+import { useAgentSession, type NoticeItem } from "@/hooks/useAgentSession";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -65,23 +66,6 @@ interface Props {
   onSoundToggle?: () => void;
   playDoneSound?: () => void;
   unlockAudio?: () => void;
-}
-
-function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string | null {
-  if (phase?.kind === "running_tools") {
-    const latest = phase.tools[phase.tools.length - 1];
-    if (latest?.progress) {
-      return `${t("chat.runningNamedTool", { name: latest.name })} ${latest.progress}`;
-    }
-    const names = phase.tools.map((t) => t.name);
-    if (names.length === 0) return t("chat.runningTool");
-    if (names.length === 1) return t("chat.runningNamedTool", { name: names[0] });
-    if (names.length <= 3) return t("chat.runningTools", { names: names.join(", ") });
-    return t("chat.runningToolsMore", { names: names.slice(0, 2).join(", "), count: names.length - 2 });
-  }
-  if (phase?.kind === "waiting_model") return t("chat.waitingModel");
-  if (phase?.kind === "running_command") return t("chat.runningCommand");
-  return null;
 }
 
 const CHAT_COLUMN_PADDING = 16;
@@ -193,11 +177,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     onAgentEnd?.();
   }, [completionNotificationsEnabled, onAgentEnd]);
 
-  // 稳定化 onEditContent 引用，配合 React.memo 防止历史消息重渲染
-  const handleEditContent = useCallback((message: UserMessage) => {
-    chatInputRef?.current?.replaceMessage(message);
-  }, [chatInputRef]);
-
   const initialScrollPositionRef = useRef(searchTarget ? null : initialScrollPosition ?? null);
   const [pendingScrollRestore, setPendingScrollRestore] = useState<Extract<ChatScrollPosition, { atBottom: false }> | null>(() => {
     const position = initialScrollPositionRef.current;
@@ -221,7 +200,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     showScrollToBottom,
     sessionIdRef, scrollContainerRef,
     lastUserMsgRef, promptAnchorActive,
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
+    handleSend, handleAbort, handleFork, handleEditContent, cancelEdit, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -819,6 +798,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       }
       onSend={handleSend}
       onAbort={handleAbort}
+      onCancelEdit={cancelEdit}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
       onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
@@ -986,7 +966,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 if (idx === lastUserIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
               };
 
-              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[] } = {}): ReactNode => {
+              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; recoverTruncation?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
                 const isVisible = isMessageGroupAnchor(msg) || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
@@ -1019,12 +999,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     searchBlock={entryIds[idx] === pendingSearchScroll?.entryId ? searchBlock : undefined}
                     onFork={sessionBusy || isNew ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
-                    onNavigate={sessionBusy ? undefined : handleNavigate}
-                    onEditContent={handleEditContent}
+                    onEditContent={sessionBusy ? undefined : handleEditContent}
                     showTimestamp={showTimestamp}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     writtenFiles={options.writtenFiles}
+                    onCompact={options.recoverTruncation ? handleCompact : undefined}
+                    isCompacting={options.recoverTruncation ? isCompacting : undefined}
+                    compactError={options.recoverTruncation ? compactError : undefined}
                   />
                 );
                 if (!isVisible || currentRefIdx === undefined) return view;
@@ -1038,20 +1020,25 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               const rendered: ReactNode[] = [];
               for (let idx = 0; idx < messages.length;) {
                 const msg = messages[idx];
-                if (!isMessageGroupAnchor(msg)) {
+                const hasAnchor = isMessageGroupAnchor(msg);
+                if (!hasAnchor && idx !== 0) {
                   rendered.push(renderMessage(idx));
                   idx += 1;
                   continue;
                 }
 
-                const userIdx = idx;
-                let endIdx = userIdx + 1;
+                // The first history page starts at a fixed entry count, so a turn
+                // longer than that page begins without its anchor. Group the
+                // leading segment anyway instead of flattening the whole turn.
+                const userIdx = hasAnchor ? idx : -1;
+                const groupStartIdx = hasAnchor ? idx : 0;
+                let endIdx = idx + 1;
                 while (endIdx < messages.length && !isMessageGroupAnchor(messages[endIdx])) endIdx += 1;
 
                 const finalAssistantIdx = findFinalAssistantIndex(messages, userIdx, endIdx);
 
                 if (finalAssistantIdx === -1) {
-                  for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+                  for (let renderIdx = groupStartIdx; renderIdx < endIdx; renderIdx++) {
                     rendered.push(renderMessage(renderIdx));
                   }
                   idx = endIdx;
@@ -1060,14 +1047,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
                 const isLiveTail = (sessionBusy || streamState.isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
                 if (isLiveTail) {
-                  for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+                  for (let renderIdx = groupStartIdx; renderIdx < endIdx; renderIdx++) {
                     rendered.push(renderMessage(renderIdx));
                   }
                   idx = endIdx;
                   continue;
                 }
 
-                rendered.push(renderMessage(userIdx));
+                if (hasAnchor) rendered.push(renderMessage(userIdx));
 
                 const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
                 const finalSplit = splitFinalAssistantBlocks(finalAssistant);
@@ -1111,7 +1098,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 if (processViews.length > 0) {
                   rendered.push(
                     <div
-                      key={`process-group-${entryIds[userIdx] ?? userIdx}`}
+                      key={`process-group-${entryIds[groupStartIdx] ?? groupStartIdx}`}
                     >
                       <ProcessDetailsGroup messageCount={processViews.length} toolCallCount={processToolCount} defaultExpanded={!finalAnswerMessage} reveal={revealProcess} t={t}>
                         {processViews}
@@ -1136,6 +1123,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                   rendered.push(renderMessage(finalAssistantIdx, {
                     messageOverride: finalAnswerMessage,
                     writtenFiles,
+                    recoverTruncation: endIdx === messages.length && !streamState.isStreaming && !hasAssistantAnswer(finalAnswerMessage),
                   }));
                 }
                 for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
@@ -1160,9 +1148,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               <MessageView message={streamState.streamingMessage as AgentMessage} toolResults={toolResultsMap} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
             )}
 
-            {agentRunning && !hasStreamingContent && agentPhase && (
+            {agentRunning && !hasStreamingContent && (agentPhase || isCompacting) && (
               <div className="break-words py-2 text-[13px] text-text-muted">
-                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t)}</span>
+                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t, isCompacting)}</span>
               </div>
             )}
 
@@ -1529,12 +1517,7 @@ function ExtensionDialog({
           overflow: "hidden",
         }}
       >
-        {/* 标题区必须能收缩。扩展往往把整段说明连换行都塞进 title，所以它可能很长；
-            原来是 flexShrink: 0 + maxHeight: "50%"，而百分比 max-height 在父容器高度
-            由内容撑开（不确定）时按规范会当成 none —— 于是长标题撑满整块，把下面的选项
-            挤出去，又被 dialog 的 overflow: hidden 裁掉，结果既看不到也滚不动。
-            改成 40vh 硬上限 + 允许收缩：长标题自己滚，选项一定留得住。 */}
-        <div style={{ flex: "0 1 auto", minHeight: 0, display: "flex", alignItems: "flex-start", gap: 8, padding: "12px 14px", borderBottom: "1px solid var(--border)", maxHeight: "40vh", overflowY: "auto" }}>
+        <div style={{ flexShrink: 1, minHeight: 0, display: "flex", alignItems: "flex-start", gap: 8, padding: "12px 14px", borderBottom: "1px solid var(--border)", maxHeight: "50vh", overflowY: "auto" }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             {/* Pi's TUI shows the title verbatim, newlines included; select/input have no
                 separate message field, so extensions put multi-line text here. */}
