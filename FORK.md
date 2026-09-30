@@ -1,12 +1,12 @@
 # FORK.md —— 相对上游做了哪些改动，以及上游更新后怎么移植
 
 上游：`https://github.com/agegr/pi-web`，本 fork 的基线是 **`96966e5`**。
-下面这份清单的规模用这条命令量（几个新增文件还未跟踪，所以手工加上了行数）：
-`git diff --stat 96966e5` → **68 个文件**（+9934 / −2127），加上 7 个新增文件共 1504 行 →
-**75 个文件**（+11438 / −2127）。
+下面这份清单的规模用这条命令量（`upstream/main` 已经并进来了，所以量到的就是 fork 自己那部分）：
+`git diff --stat upstream/main HEAD` → **53 个文件**（+10547 / −1852）。
 
-> **当前状态**：本 fork 的 `main` 已经压在上游 `433d09e` 之上（比基线多
-> `fd037e4` / `6a1246e` / `433d09e` 三个提交，均已完整保留），这份改动叠在它们上面。
+> **当前状态**：本 fork 的 `main` 压在上游 `7303179` 之上 —— 比基线 `96966e5` 多 12 个上游提交
+> （`fd037e4` / `6a1246e` / `433d09e`，加上后来 merge 进来的 9 个，均已完整保留），
+> fork 自己 4 个提交 + 1 个 merge commit 叠在它们上面。
 > 上游再更新时，按第五节把这里的改动重新叠一次。
 
 改动性质：把界面改成 IDE 式三栏 + 顶栏会话标签条、加一个 macOS 桌面外壳。**没有动任何业务逻辑**
@@ -57,16 +57,16 @@
 | --- | --- | --- |
 | `components/SessionSidebar.tsx` | +285 / −250 | ① 会话/文件切成一个切换器（复用既有 `explorerOpen`，没加 state）② 新建会话满宽按钮 ③ 常驻搜索框（原来是点图标才展开）④ 项目分区标题 ⑤ 会话项的悬停按钮收进 ⋯ 菜单 ⑥ 标题超长才渐隐（`useOverflowingText` 实测 `scrollWidth`）⑦ 顶栏行（设置齿轮 + 收起侧栏） |
 | `components/TabBar.tsx` | +1 | 只加了一个 `className="file-tabs"`（铁律 2 里「加 className」那一半）。右栏文件标签条外面由 `components/FileTabStrip.tsx` 包一层，原生滚动条由 `native-theme.css` 的 `.file-tabs` 隐掉；上游那个 inline 的 `overflow-x: auto` **没动**，仍然是滚动视口本身 |
-| `components/AppShell.tsx` | +506 / −195 | ① 三柱布局与顶栏那一行 ② **顶栏左端是会话标签条**（取代上游的扩展状态行），见下 ③ ⋯ 菜单（复用上游 `renderChatToolbarActions`）④ 信息面板只在中间弹出（几何按中间列矩形算）+ 全宽展开时为红绿灯留位 ⑤ 脚本侧栏开关只在收起后出现 ⑥ 收起时让开红绿灯宽度 ⑦ 设置入口改为左栏齿轮 |
-| `components/ChatWindow.tsx` | +57 / −124 | ① 删掉空会话头部的品牌行（logo + Pi Web + 版本号）② 扩展弹窗标题区改为「可收缩 + 40vh 硬上限」③ 消息列表加 `.chat-scroll-area`（常显滚动条）④ 删掉地图的引用 |
+| `components/AppShell.tsx` | +574 / −204 | ① 三柱布局与顶栏那一行 ② **顶栏左端是会话标签条**（取代上游的扩展状态行），见下 ③ ⋯ 菜单（复用上游 `renderChatToolbarActions`）④ 信息面板只在中间弹出（几何按中间列矩形算）+ 全宽展开时为红绿灯留位 ⑤ 脚本侧栏开关只在收起后出现 ⑥ 收起时让开红绿灯宽度 ⑦ 设置入口改为左栏齿轮 |
+| `components/ChatWindow.tsx` | +52 / −123 | ① 删掉空会话头部的品牌行（logo + Pi Web + 版本号）② 消息列表加 `.chat-scroll-area`（常显滚动条）③ 删掉地图的引用（`ChatMinimap` / `useMessageRefs` 整个拿掉，所以上游 #941 给进程分组新加的 `ref` 也一并去掉，只留它的 `key`）④ 扩展弹窗标题区：fork 当初改成「可收缩 + 40vh」，合并上游时发现 #961 修的是同一个 bug（百分比 max-height 在内容撑开的容器里按规范等于 `none`），已改用上游的 `flexShrink: 1 + 50vh`，fork 那份退休 ⑤ 内联 `phaseLabel` 随上游抽到 `lib/chat-phase-label.ts`（多了 `isCompacting` 参数） |
 | `components/ExtensionStatusBar.tsx` | +26 / −15 | 抽出 `ExtensionStatusLine` 单独导出（仍只有一份实现）。**fork 起初把它放在中栏顶栏，现在那里改成了会话标签条，所以 `ExtensionStatusLine` 在 app 里已不再被渲染** —— 组件与 `ChatWindow` 上报 `extensionStatuses` 的那条链都留着，要重新露出（例如收进 ⋯ 菜单）不必复现数据流 |
 | `components/ChatInput.tsx` | +17 / −3 | ① 控制条中间槽从空 spacer 变成真居中槽（`contextSlot`）② 去掉为地图留的 `paddingRight: 52` |
 | `components/BranchNavigator.tsx` | +10 / −2 | ① 图标配色跟「是否展开」而不是「是否有内容」② 下拉高度上限 `min(520px, 可视剩余空间)` |
-| `components/MessageView.tsx` | ≈0 | 净改动为零（流式 token 统计删掉后又按需恢复），只有 2 条 `SAFETY:` 注释 |
-| `lib/i18n/messages/{zh-CN,en,zh-TW}.ts` | +12 / −2 | 新增 6 个 key（`sidebar.viewSessions` `viewFiles` `newSession` `projects` `moreActions`、`session.cacheHitShort`、`chat.ctxUsage`）+ 3 个 `sessionTab.*` key + 2 个 `tabStrip.*` key（两条标签条共用的滚动按钮文案）；删掉 2 个地图 key |
+| `components/MessageView.tsx` | +6 / −0 | 只有 2 条 `SAFETY:` 注释（说明 `ImageContent` 与 pi-ai 旧扁平 shape 的兼容读法）。早先删掉的流式 token 统计已按需恢复，所以净改动只剩注释 |
+| `lib/i18n/messages/{zh-CN,en,zh-TW}.ts` | +12 / −2 | 新增 12 个 key（`sidebar.viewSessions` `viewFiles` `newSession` `projects` `moreActions`、`session.cacheHitShort`、`chat.ctxUsage`、3 个 `sessionTab.*`、2 个 `tabStrip.*` 两条标签条共用的滚动按钮文案）；删掉 2 个地图 key |
 | `app/layout.tsx` | +3 | 引入 `native-theme.css` |
 | `.gitignore` / `eslint.config.mjs` / `AGENTS.md` | 小 | 忽略规则（含打包产物）、lint 忽略 `desktop/src-tauri/{runtime,target,gen,icons}`、文档 |
-| 7 个 `*.test.mjs` | 小 | 断言随 UI 结构更新 |
+| 11 个 `*.test.mjs` | +231 / −124 | 断言随 UI 结构更新（其中 `AppShell.workspace-memory.test.mjs` 占大头） |
 
 ## 四、删除
 
@@ -86,7 +86,8 @@
    - `bin/pi-web.js` 的 CLI（`-p` / `--no-open`）与 `.next` 的目录约定没变；
    - `tauri.conf.json` 的 `productName`、`bundle.resources: ["runtime/"]` 仍在；
    - `main.rs` 里对 `runtime/app/...` 的路径假设仍成立。
-6. **跑门禁**：`npx tsc --noEmit` → 0、`npx eslint .` → 0、`npm test`（1349 项）。
+6. **跑门禁**：`npx tsc --noEmit` → 0、`npx eslint .` → 0、`npm test`（1379 项）。
+   注意 macOS 上要先 `TMPDIR=/private/tmp/pi-test-tmp npm test`（原因见 AGENTS.md 的 Quick Start）。
    界面上还有几条要人眼看的：红绿灯位置、左栏观感、滚动条。
 
 ## 六、容易踩的坑（都是踩过的）
@@ -100,6 +101,9 @@
 - **扩展弹窗标题区的 `maxHeight` 必须是 `vh` 而不是 `%`。**
   父容器高度由内容撑开时，百分比 max-height 按规范会被当成 `none` —— 长标题会撑满整块、
   把下面的选项挤出去，再被 `overflow: hidden` 裁掉。曾经的 `maxHeight: "50%"` 就是这个 bug。
+  **上游 #961 已自己修好**（`flexShrink: 1` + `50vh`），fork 那份 40vh 已退休、跟随上游。
+  附带一条踩坑：往这段代码附近写注释时，别把 `maxHeight: "50%"` 原样写进去 ——
+  上游那条 `assert.doesNotMatch(header, /maxHeight: "50%"/)` 会把注释也算进去。
 - **红绿灯位置在 `desktop/src-tauri/src/main.rs`**，`traffic_light_position` 的第二个参数
   **不是「距顶部的距离」**：AppKit 左下原点、tao 只改按钮的 X，所以该值使按钮整体下移，
   斜率正好 1。当前标定与历史写在代码注释里。
@@ -158,7 +162,7 @@ git merge upstream/main
 # 6. 门禁，三项都要通过
 npx tsc --noEmit
 npx eslint .
-npm test
+TMPDIR=/private/tmp/pi-test-tmp npm test   # macOS：默认 TMPDIR 是软链，有两条上游测试会误报
 
 # 7. 推到你自己的仓库
 git push

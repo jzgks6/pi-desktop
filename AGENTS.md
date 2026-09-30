@@ -16,6 +16,11 @@ npm run dev   # port 30141
 
 Typecheck: `node_modules/.bin/tsc --noEmit`  
 Lint: `npm run lint`  
+Test: `npm test` — on macOS set `TMPDIR` to a **real** path outside the home directory first
+(`TMPDIR=/private/tmp/pi-test-tmp npm test`). Two upstream tests are sensitive to the default
+`/var/folders/...` value: it is a symlink to `/private/var/...`, so `lib/worktree.test.mjs`
+sees Git report the resolved path and fails; putting `TMPDIR` inside `$HOME` instead trips
+`lib/enabled-models-runtime.test.mjs`, which expects a temp path that is not home-relative.
 **Never run `next build` during dev** — pollutes `.next/` and breaks `npm run dev`.
 
 ### Dev server troubleshooting
@@ -85,6 +90,7 @@ app/api/
   skills/search/route.ts          GET/POST skills.sh search
   subagents/settings/route.ts     GET/PUT built-in subagent feature setting
   worktrees/route.ts              GET/POST/DELETE git worktrees
+  open-in-explorer/route.ts       GET availability | POST reveal a cwd in Finder/Explorer
   web-auth/route.ts               GET status | POST login | DELETE logout (browser password)
   plugins/check/route.ts          POST check plugin package updates
   project-trust/route.ts          GET/POST project trust for package installs
@@ -115,6 +121,8 @@ lib/
   markdown.ts          shared markdown helpers
   node-cli.ts          locate bundled npm-cli.js / npx-cli.js so npm/npx spawn without a shell (Windows npm.cmd)
   npx.ts               npx runner used by skill install
+  chat-phase-label.ts  phaseLabel(phase, t, compacting) — status text for the chat phase
+  open-in-file-manager.ts  platform label + server-side reveal helper for /api/open-in-explorer
   plugin-updates.ts    npm view update checks for /api/plugins/check
   pi-types.ts          local structural types for pi SDK objects
   rpc-manager.ts      AgentSessionWrapper + registry + startRpcSession
@@ -136,7 +144,9 @@ components/
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
   BranchNavigator.tsx in-session branch switcher
   MarkdownBody.tsx    markdown renderer
+  DismissButton.tsx   small ✕ used to dismiss inline error rows
   ModelsConfig.tsx    modal for editing models.json (opened from sidebar bottom)
+  models-config-helpers.ts  pure helpers behind ModelsConfig (field edits, provider rows)
   EnabledModelsSection.tsx  model switches inside ModelsConfig, backed by enabledModels
   AgentsConfig.tsx    built-in subagent toggle + agent profile editor
   PluginsConfig.tsx   modal for installed package plugins
