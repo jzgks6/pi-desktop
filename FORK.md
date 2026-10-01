@@ -144,9 +144,16 @@
   拷一份到 `~/.pi/attachments/`（`local`，有暂存上限）；app 里走 `plugin:dialog|open` 拿真路径
   （`link`，一个字节都不过网，**没有任何大小检查**）。两条路在 `ChatDraftFile.kind` 上分开。
 - **`capabilities/default.json` 里的 `dialog:allow-open` 不能删。** 路径走的是
-  `window.__TAURI_INTERNALS__.invoke("plugin:dialog|open")` —— 没这个权限就报权限错，而不是回落。
+  `window.__TAURI_INTERNALS__.invoke("plugin:dialog|open")` —— 没这个权限就报
+  `Command plugin:dialog|open not allowed by ACL`，而不是回落。
   另外 `lib/desktop-file-picker.ts` 在普通浏览器里是纯 no-op（没有 `__TAURI_INTERNALS__`），
   所以同一个页面在 localhost 里也能跑，只是回落成 `<input type=file>` + 暂存。
+- **我们的页面是「远程来源」。** app 的窗口导航到 `http://127.0.0.1:<port>/`，而 capability
+  默认只对**本地** app context 生效（生成物里会写 `"local": true`）—— 必须在 capability 里
+  写 `remote.urls`，否则一律 `not allowed by ACL`。
+  又：`remote.urls` 走 URLPattern，**端口不会自动通配**，`http://127.0.0.1` 匹配不了
+  `http://127.0.0.1:30145`，要写 `http://127.0.0.1:*`（拿 tauri-utils 的 `RemoteUrlPattern`
+  实测过，`tauri-utils` 只把 search/hash/pathname 补成 `*`，不碰 port）。
 - **`runBuiltinCommand` 里不能加 `attachedFiles`。** 上游那个测试（“locks built-in command submission
   until it settles”）会把这段回调的源码抽出来丢进一个固定 vm 上下文里跑，拿不到的变量会直接抛。
   fork 的附件拦截放在两个调用点（`handleSend` / `sendQueued`），回调本身保持上游原样。

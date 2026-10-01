@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "pi desktop 只给主窗口一项额外权限：打开原生文件选择对话框（用于 composer 的「附加文件」）。",
   "windows": ["main"],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*",
+      "http://localhost:*"
+    ]
+  },
   "permissions": ["dialog:allow-open"]
 }
