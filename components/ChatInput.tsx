@@ -19,6 +19,16 @@ import {
   isBase64ImageWithinLimits,
 } from "@/lib/image-attachments";
 import {
+  MAX_LOCAL_FILE_BYTES,
+  classifyAttachmentFile,
+  composeOutgoingMessage,
+  formatAttachmentSize,
+  isChatDraftFile,
+  isImageAttachmentFile,
+  stageAttachmentFile,
+  type ChatDraftFile,
+} from "@/lib/file-attachments";
+import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
@@ -402,8 +412,9 @@ export function canRestoreUserMessage(
   value: string,
   attachedImageCount: number,
   pendingImageCount: number,
+  attachedFileCount = 0,
 ): boolean {
-  return !value.trim() && attachedImageCount === 0 && pendingImageCount === 0;
+  return !value.trim() && attachedImageCount === 0 && pendingImageCount === 0 && attachedFileCount === 0;
 }
 
 export function getUserMessageText(message: UserMessage): string {
@@ -592,8 +603,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
+  // 非图片附件（fork）：文本类注入消息正文，其余只给本地路径。
+  const [attachedFiles, setAttachedFiles] = useState<ChatDraftFile[]>(() => (
+    draftKey ? (getDraft(draftKey)?.files ?? []).filter(isChatDraftFile) : []
+  ));
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const trimmedValue = value.trimStart();
-  const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
+  const bashMode = attachedImages.length === 0 && attachedFiles.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
@@ -637,9 +653,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const draftKeyRef = useRef(draftKey);
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
+  const attachedFilesRef = useRef(attachedFiles);
   const pendingImageCountRef = useRef(0);
+  /** 发送失败时用来把附件塞回输入框（上游的 restoreSubmission 只带 text + images）。
+   *  `text` 是实际发出去的正文（含注入块），`typed` 是用户原始输入 ——
+   *  失败恢复时把输入框还原成 `typed`，不把注入的 `<file>` 块留在框里。 */
+  const lastSubmittedFilesRef = useRef<{ text: string; typed: string; files: ChatDraftFile[] } | null>(null);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
+  attachedFilesRef.current = attachedFiles;
 
   useImperativeHandle(ref, () => ({
     insertIfEmpty(text: string) {
@@ -659,7 +681,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     replaceMessage(message: UserMessage) {
       const ta = textareaRef.current;
       const current = ta ? ta.value : value;
-      if (!canRestoreUserMessage(current, attachedImagesRef.current.length, pendingImageCountRef.current)) return false;
+      if (!canRestoreUserMessage(current, attachedImagesRef.current.length, pendingImageCountRef.current, attachedFilesRef.current.length)) return false;
 
       const restoredText = getUserMessageText(message);
       const restoredImages = draftImagesToAttachedImages(getUserMessageDraftImages(message));
@@ -708,30 +730,40 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       const currentDraft = {
         value: valueRef.current,
         images: attachedImagesRef.current.map(imageToDraftImage),
+        files: attachedFilesRef.current.map((file) => ({ ...file })),
       };
-      const moved = rekeyStoredDraft(previousKey, nextKey, currentDraft) ?? { value: "", images: [] };
+      const moved = rekeyStoredDraft(previousKey, nextKey, currentDraft) ?? { value: "", images: [], files: [] };
       const unchanged = moved.value === currentDraft.value
         && moved.images.length === currentDraft.images.length
         && moved.images.every((image, index) => (
           image.data === currentDraft.images[index]?.data
           && image.mimeType === currentDraft.images[index]?.mimeType
-        ));
+        ))
+        && (moved.files?.length ?? 0) === currentDraft.files.length;
       draftKeyRef.current = nextKey;
       if (unchanged) return;
 
       const movedImages = draftImagesToAttachedImages(moved.images);
+      const movedFiles = (moved.files ?? []).filter(isChatDraftFile);
       valueRef.current = moved.value;
       attachedImagesRef.current = movedImages;
+      attachedFilesRef.current = movedFiles;
       setValue(moved.value);
       setAttachedImages((current) => {
         current.forEach(revokeImagePreview);
         return movedImages;
       });
+      setAttachedFiles(movedFiles);
       setAtQuery(null);
       setHistoryMenuOpen(false);
     },
     restoreSubmission(text: string, images?: ChatDraftImage[], targetDraftKey?: string) {
-      if (!text.trim() && !images?.length) return;
+      // 上游只回传 text + images；附件（以及用户原始输入）从最近一次提交的存档里取回。
+      const submitted = lastSubmittedFilesRef.current;
+      const matchesSubmission = Boolean(submitted && submitted.text === text);
+      const submittedFiles = matchesSubmission ? submitted!.files : [];
+      if (matchesSubmission) text = submitted!.typed;
+      if (!text.trim() && !images?.length && submittedFiles.length === 0) return;
 
       // clearInput is queued before the submission handler runs. Compose with
       // that queued state so a fast rejection cannot observe stale DOM text and
@@ -749,6 +781,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         targetsCurrentComposer
           ? attachedImagesRef.current.map(imageToDraftImage)
           : (storedDraft?.images ?? []),
+        submittedFiles,
+        targetsCurrentComposer
+          ? attachedFilesRef.current
+          : (storedDraft?.files ?? []),
       );
       // The first optimistic message switches ChatWindow out of its empty-state
       // layout and remounts this component. Persist synchronously so recovery is
@@ -782,6 +818,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             .slice(0, available);
           const next = restored.length > 0 ? [...restored, ...current] : current;
           attachedImagesRef.current = next;
+          return next;
+        });
+      }
+      if (submittedFiles.length > 0) {
+        setAttachedFiles((current) => {
+          const available = Math.max(0, MAX_ATTACHED_IMAGES - current.length);
+          const restored = submittedFiles.slice(0, available);
+          if (restored.length === 0) return current;
+          const next = [
+            ...restored,
+            ...current.filter((file) => !restored.some((kept) => (
+              kept.kind === file.kind && kept.name === file.name
+              && kept.path === file.path && kept.text === file.text
+            ))),
+          ];
+          attachedFilesRef.current = next;
           return next;
         });
       }
@@ -819,7 +871,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       });
     },
     addImages(files: File[]) {
-      processImageFiles(files);
+      // 名字是上游的（handle 接口不能随便改）；这里接的是“任何文件”——
+      // 图片走图片通道，其余当附件处理（拖放进入聊天窗口就是这条路）。
+      processAttachmentFiles(files);
     },
   }));
 
@@ -827,7 +881,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (compact) return;
     const remaining = Math.max(
       0,
-      MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
+      MAX_ATTACHED_IMAGES
+        - attachedImagesRef.current.length
+        - attachedFilesRef.current.length
+        - pendingImageCountRef.current,
     );
     const imageFiles = files
       .filter((f) => f.type.startsWith("image/") && f.size <= MAX_ATTACHED_IMAGE_BYTES)
@@ -871,6 +928,85 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     });
   }, []);
 
+  /**
+   * 「附加文件」（fork）：图片交给上面的图片通道，其余分两类 ——
+   * 文本类（≤ 256KB）读进内存、发送时注入消息正文；其它先暂存到本机
+   * （`~/.pi/attachments/`），消息里只给一个 `@绝对路径`，让模型用自己
+   * 的本地工具去读（原始字节不进模型上下文）。
+   */
+  const processAttachmentFiles = useCallback(async (files: File[]) => {
+    if (compact || files.length === 0) return;
+    const imageFiles: File[] = [];
+    const otherFiles: File[] = [];
+    for (const file of files) {
+      if (isImageAttachmentFile(file.type, file.name)) imageFiles.push(file);
+      else otherFiles.push(file);
+    }
+    if (imageFiles.length) void processImageFiles(imageFiles);
+    if (otherFiles.length === 0) return;
+
+    const remaining = Math.max(
+      0,
+      MAX_ATTACHED_IMAGES
+        - attachedImagesRef.current.length
+        - attachedFilesRef.current.length
+        - pendingImageCountRef.current,
+    );
+    let notice: string | null = otherFiles.length > remaining
+      ? t("chat.attachmentLimitReached", { count: MAX_ATTACHED_IMAGES })
+      : null;
+
+    const accepted: ChatDraftFile[] = [];
+    for (const file of otherFiles.slice(0, remaining)) {
+      if (file.size > MAX_LOCAL_FILE_BYTES) {
+        notice = t("chat.attachmentTooLarge", {
+          name: file.name,
+          size: formatAttachmentSize(MAX_LOCAL_FILE_BYTES),
+        });
+        continue;
+      }
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const classification = classifyAttachmentFile({ name: file.name, type: file.type, bytes });
+        if (classification.kind === "image") {
+          // 浏览器没给 MIME、只能按扩展名认出来的图片，退回图片通道。
+          void processImageFiles([file]);
+          continue;
+        }
+        accepted.push(classification.kind === "text"
+          ? { kind: "text", name: file.name, size: file.size, text: classification.text }
+          : { kind: "local", name: file.name, size: file.size, path: await stageAttachmentFile(file) });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        notice = t("chat.attachmentFailed", { name: file.name, message });
+      }
+    }
+
+    if (accepted.length > 0) {
+      setAttachedFiles((prev) => {
+        const available = Math.max(0, MAX_ATTACHED_IMAGES - prev.length);
+        const next = [...prev, ...accepted.slice(0, available)];
+        attachedFilesRef.current = next;
+        return next;
+      });
+    }
+    setAttachmentError(notice);
+  }, [compact, processImageFiles, t]);
+
+  const removeFile = useCallback((index: number) => {
+    setAttachedFiles((prev) => {
+      const next = [...prev];
+      next.splice(index, 1);
+      attachedFilesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const clearFiles = useCallback(() => {
+    attachedFilesRef.current = [];
+    setAttachedFiles([]);
+  }, []);
+
   const clearInput = useCallback(() => {
     valueRef.current = "";
     setValue("");
@@ -879,18 +1015,20 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
     clearImages();
+    clearFiles();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearImages, draftKey]);
+  }, [clearFiles, clearImages, draftKey]);
 
   useEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
     setDraft(draftKey, {
       value,
       images: attachedImages.map(imageToDraftImage),
+      ...(attachedFiles.length > 0 ? { files: attachedFiles.map((file) => ({ ...file })) } : {}),
     });
-  }, [attachedImages, draftKey, value]);
+  }, [attachedFiles, attachedImages, draftKey, value]);
 
   useEffect(() => {
     const previousDraftKey = draftKeyRef.current;
@@ -900,6 +1038,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setDraft(previousDraftKey, {
         value: valueRef.current,
         images: attachedImagesRef.current.map(imageToDraftImage),
+        ...(attachedFilesRef.current.length > 0
+          ? { files: attachedFilesRef.current.map((file) => ({ ...file })) }
+          : {}),
       });
     }
 
@@ -907,8 +1048,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     draftKeyRef.current = draftKey;
     const nextValue = draft?.value ?? "";
     const nextImages = draftImagesToAttachedImages(draft?.images);
+    const nextFiles = (draft?.files ?? []).filter(isChatDraftFile);
     valueRef.current = nextValue;
     attachedImagesRef.current = nextImages;
+    attachedFilesRef.current = nextFiles;
     setValue(nextValue);
     setAtQuery(null);
     setHistoryMenuOpen(false);
@@ -916,6 +1059,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       prev.forEach(revokeImagePreview);
       return nextImages;
     });
+    setAttachedFiles(nextFiles);
   }, [draftKey]);
 
   const resizeTextarea = useCallback(() => {
@@ -967,6 +1111,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const runBuiltinCommand = useCallback(async (msg: string): Promise<boolean> => {
+    // 上游的纯文本路径，一字不改（测试会白盒抽取这段回调）；
+    // fork 的附件拦截放在两个调用点（见 handleSend / sendQueued）。
     if (attachedImages.length || !msg.startsWith("/") || !onBuiltinCommand) return false;
     if (builtinCommandPendingRef.current) return true;
     builtinCommandPendingRef.current = true;
@@ -984,14 +1130,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const handleSend = useCallback(async () => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
+    if (!msg && !attachedImages.length && !attachedFiles.length) return;
     onAudioUnlock?.();
-    const builtinAllowed = !isStreaming || canRunBuiltinSlashCommandWhileStreaming(msg);
+    const builtinAllowed = attachedFiles.length === 0
+      && (!isStreaming || canRunBuiltinSlashCommandWhileStreaming(msg));
     if (builtinAllowed && await runBuiltinCommand(msg)) return;
     if (isStreaming) return;
+    // 附件先拼进正文（文本注入 / 本地文件给 @路径），图片仍走 images 通道。
+    const outgoing = composeOutgoingMessage(msg, attachedFiles);
+    lastSubmittedFilesRef.current = attachedFiles.length ? { text: outgoing, typed: msg, files: attachedFiles } : null;
     clearInput();
-    onSend(msg, attachedImages.length ? attachedImages : undefined);
-  }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+    onSend(outgoing, attachedImages.length ? attachedImages : undefined);
+  }, [value, attachedImages, attachedFiles, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
   const slashQuery = !compact && value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -1026,7 +1176,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? t(slashQuery ? "chat.match" : "chat.command")
     : t(slashQuery ? "chat.matches" : "chat.commands", { count: filteredSlashCommands.length });
   const hasInputText = Boolean(value.trim());
-  const canQueueStreamingMessage = hasInputText || attachedImages.length > 0;
+  const canQueueStreamingMessage = hasInputText || attachedImages.length > 0 || attachedFiles.length > 0;
+  /** 图片或附件任意一个有内容，就点亮发送/附加按钮（fork）。 */
+  const hasAttachments = attachedImages.length > 0 || attachedFiles.length > 0;
   // Warn when images are attached but the selected model is known not to accept
   // image input (#584), including a resolved default. Unknown models stay silent.
   const showImageUnsupportedWarning = (
@@ -1222,25 +1374,27 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
+    if (!msg && !attachedImages.length && !attachedFiles.length) return;
     onAudioUnlock?.();
-    if (!attachedImages.length && onBuiltinCommand && canRunBuiltinSlashCommandWhileStreaming(msg)) {
+    if (!attachedImages.length && !attachedFiles.length && onBuiltinCommand && canRunBuiltinSlashCommandWhileStreaming(msg)) {
       void runBuiltinCommand(msg);
       return;
     }
+    const outgoing = composeOutgoingMessage(msg, attachedFiles);
+    lastSubmittedFilesRef.current = attachedFiles.length ? { text: outgoing, typed: msg, files: attachedFiles } : null;
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
     if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
       clearInput();
-      onPromptWithStreamingBehavior(msg, streamingBehavior, attachedImages.length ? attachedImages : undefined);
+      onPromptWithStreamingBehavior(outgoing, streamingBehavior, attachedImages.length ? attachedImages : undefined);
       return;
     }
     clearInput();
     if (mode === "steer" && onSteer) {
-      onSteer(msg, attachedImages.length ? attachedImages : undefined);
+      onSteer(outgoing, attachedImages.length ? attachedImages : undefined);
     } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, attachedImages.length ? attachedImages : undefined);
+      onFollowUp(outgoing, attachedImages.length ? attachedImages : undefined);
     }
-  }, [value, attachedImages, onBuiltinCommand, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, runBuiltinCommand]);
+  }, [value, attachedImages, attachedFiles, onBuiltinCommand, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, runBuiltinCommand]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = displayedSlashCommands.length - 1;
@@ -1633,18 +1787,25 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       {!compact && <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
         multiple
         style={{ display: "none" }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
-          processImageFiles(files);
+          processAttachmentFiles(files);
           e.target.value = "";
         }}
       />}
       <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
+        {attachmentError && (
+          <ModelNoticeBanner
+            tone="warning"
+            title={t("chat.attachFile")}
+            body={attachmentError}
+            onClose={() => setAttachmentError(null)}
+          />
+        )}
         {showImageUnsupportedWarning && (() => {
           const entry = modelList?.find((m) => m.provider === model?.provider && m.id === model?.modelId);
           return (
@@ -1807,6 +1968,51 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     display: "flex", alignItems: "center", justifyContent: "center",
                     cursor: "pointer", padding: 0, color: "var(--text-muted)",
                   }}
+                >
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* 非图片附件（fork）：文本类会被注入正文，其余只给本地路径 */}
+        {attachedFiles.length > 0 && (
+          <div className="chat-file-chips">
+            {attachedFiles.map((file, i) => (
+              <div
+                key={`${file.kind}:${file.name}:${i}`}
+                className="chat-file-chip"
+                title={file.path ?? file.name}
+              >
+                <span className="chat-file-chip-icon" aria-hidden="true">
+                  {file.kind === "text" ? (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="8" y1="13" x2="16" y2="13" />
+                      <line x1="8" y1="17" x2="13" y2="17" />
+                    </svg>
+                  ) : (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                    </svg>
+                  )}
+                </span>
+                <span className="chat-file-chip-body">
+                  <span className="chat-file-chip-name">{file.name}</span>
+                  <span className="chat-file-chip-meta">
+                    {file.kind === "text" ? t("chat.attachedTextFile") : t("chat.attachedLocalFile")}
+                    {" · "}
+                    {formatAttachmentSize(file.size)}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  className="chat-file-chip-remove"
+                  onClick={() => removeFile(i)}
                 >
                   <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
                     <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
@@ -2284,21 +2490,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           ) : (
             <button
               onClick={handleSend}
-              disabled={!value.trim() && !attachedImages.length}
+              disabled={!value.trim() && !attachedImages.length && !attachedFiles.length}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
+                background: (value.trim() || attachedImages.length || attachedFiles.length) ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
-                color: (value.trim() || attachedImages.length) ? "var(--accent-contrast)" : "var(--text-dim)",
-                cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                color: (value.trim() || attachedImages.length || attachedFiles.length) ? "var(--accent-contrast)" : "var(--text-dim)",
+                cursor: (value.trim() || attachedImages.length || attachedFiles.length) ? "pointer" : "not-allowed",
                 fontSize: 13,
                 fontWeight: 600,
                 letterSpacing: "-0.01em",
-                boxShadow: (value.trim() || attachedImages.length) ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
+                boxShadow: (value.trim() || attachedImages.length || attachedFiles.length) ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >
@@ -2332,30 +2538,28 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
             <button
               onClick={() => fileInputRef.current?.click()}
-             title={t("chat.attachImage")}
+             title={t("chat.attachFile")}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 9,
-                color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
+                color: hasAttachments ? "var(--accent)" : "var(--text-muted)",
                 cursor: "pointer",
                 opacity: 1,
                 transition: "background 0.12s, color 0.12s",
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text)";
+                e.currentTarget.style.color = hasAttachments ? "var(--accent)" : "var(--text)";
               }}
               onMouseLeave={(e) => {
                 e.currentTarget.style.background = "none";
-                e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text-muted)";
+                e.currentTarget.style.color = hasAttachments ? "var(--accent)" : "var(--text-muted)";
               }}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <polyline points="21 15 16 10 5 21" />
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
               </svg>
             </button>
             {/* Model selector - visible always, disabled while the session or switch is busy */}

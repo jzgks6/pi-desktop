@@ -527,6 +527,7 @@ test("does not restore a historical message over a pending image attachment", ()
   assert.equal(canRestoreUserMessage("", 0, 0), true);
   assert.equal(canRestoreUserMessage("", 1, 0), false);
   assert.equal(canRestoreUserMessage("", 0, 1), false);
+  assert.equal(canRestoreUserMessage("", 0, 0, 1), false);
   assert.equal(canRestoreUserMessage("draft", 0, 0), false);
 });
 

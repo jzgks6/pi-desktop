@@ -475,9 +475,14 @@ fn main() {
 
             // 主窗口先建出来显示启动页，避免等服务时是一片空白。
             // 窗口配置（含红绿灯标定）都在 app_window 里，⌘N 开出来的窗口共用同一套。
-            let window = app_window(app.handle(), "main", WebviewUrl::App("index.html".into()), port)
-                .center()
-                .build()?;
+            let window = app_window(
+                app.handle(),
+                "main",
+                WebviewUrl::App("index.html".into()),
+                port,
+            )
+            .center()
+            .build()?;
             spawn_navigate_when_ready(window, port);
 
             Ok(())

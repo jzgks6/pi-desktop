@@ -2,7 +2,7 @@
 
 上游：`https://github.com/agegr/pi-web`，本 fork 的基线是 **`96966e5`**。
 下面这份清单的规模用这条命令量（`upstream/main` 已经并进来了，所以量到的就是 fork 自己那部分）：
-`git diff --stat upstream/main HEAD` → **53 个文件**（+10547 / −1852）。
+`git diff --stat upstream/main HEAD` → **60 个文件**（+11485 / −1897）。
 
 > **当前状态**：本 fork 的 `main` 压在上游 `7303179` 之上 —— 比基线 `96966e5` 多 12 个上游提交
 > （`fd037e4` / `6a1246e` / `433d09e`，加上后来 merge 进来的 9 个，均已完整保留），
@@ -37,6 +37,8 @@
 | `app/native-theme.css` | **fork 的全部样式**（左栏、顶栏、统计行、弹窗、会话行菜单…） |
 | `lib/context-stats.ts` | 上下文统计的纯函数：`compactTokens` / `computeContextStats` / `contextStatsParts` |
 | `lib/session-tabs.ts` | 会话标签的纯函数 + `localStorage` 读写：标签的开关 / 去重 / 转正 / 关闭，草稿按标签隔离的键（`draftKeyForTab` / `parkedDraftKeyForTab`），以及「最多一个空白草稿标签」的折叠规则（空白标签一旦打开就不会被别处收掉） |
+| `lib/file-attachments.ts` | 「附加文件」的纯函数：二进制/文本嗅探（`looksLikeTextBytes`）、分类（图片 / 文本 / 本地文件）、pi 格式的 `<file name="…">…</file>` 文本块、`@路径` 引用、发送前的正文拼装（`composeOutgoingMessage`），以及把文件交给 `/api/attachments` 暂存的 `stageAttachmentFile` |
+| `lib/attachment-staging.ts` | 暂存侧的名字处理（仅服务端）：暂存目录 `~/.pi/attachments/`、文件名消毒/截断（保留扩展名）、时间戳前缀与同秒去重 |
 | `components/SessionTabBar.tsx` | 中栏顶栏左端的会话标签条：横向滚动 + 两侧滚动按钮（只在那一侧还有内容时出现）+ 右侧 `+`，标签带运行中呼吸点与关闭按钮；标签可按住左右拖拖动排序。尺寸 / 配色照右栏的 `TabBar`；滚动行为与会话标签条共用 `hooks/useTabStripScroll.ts` |
 | `hooks/useTabStripScroll.ts` | 一条横向标签栏的滚动行为：两侧箭头、滚轮映射成横向滚动、活动项自动进视野。会话标签条与右栏文件标签条共用（两个地方的边界条件很容易各自跑偏） |
 | `hooks/useTabStripDrag.ts` | 同一个横向标签栏的「按住拖动排序」：被拖的贴着指针走、其它项 FLIP 滑到新位置、拖完吞掉那一下 click。按 **DOM 节点** 而不是 id 工作（右栏标签是上游渲染的，加不了 `data-*`），且同时支持「逐项绑定」与会话标签条和「事件委托」（右栏）两种入口；FLIP 用 WAAPI，因为右栏的 `transition` 是上游的 inline 值，fork 加不进 `transform` |
@@ -45,6 +47,7 @@
 | `components/ChatContextStats.tsx` | 输入框下方中间槽那一行：圆环 + 百分比 + 总 token + 缓存 + 花费 |
 | `components/ContextUsageRing.tsx` | 从上游移植的圆环，加了 `decorative` 模式（避免 button 嵌套 button） |
 | `design-prototypes/sessions-sidebar.html` | 左栏的设计稿（仅存档，无代码作用） |
+| `app/api/attachments/route.ts` | `POST /api/attachments`：把「附加文件」里的非文本文件暂存到 `~/.pi/attachments/`，只回传绝对路径（原始字节不进模型上下文）。放在 `~/.pi/` 而不是会话工作区，否则会污染项目目录与 git 状态 |
 | `desktop/`（7 个文件） | macOS 外壳：Tauri 工程 + 启动页 + 说明，详见 `desktop/README.md`。`src/main.rs` 里还建了一份应用菜单，注册三个原生快捷键：**⌘T** 新建空白会话标签、**⌘W** 关闭当前标签、**⌘,** 打开设置。三者都只把命令 `eval` 成 CustomEvent 交给网页（见 `hooks/useDesktopMenuCommands.ts`）。菜单里**不能**再放「关闭窗口」（默认菜单那个 ⌘W 必须拿掉，否则两个 ⌘W 打架；现在 ⌘W 完全不碰窗口）；编辑菜单必须留着，否则输入框里的 ⌘C/⌘V/⌘A 会失效」；另外 `main.rs` 注册了 `on_new_window`，把指向自己服务的新窗口请求交给系统默认浏览器（否则网页里的 `window.open` / `target="_blank"` 会被 WebView 静默丢掉，点「完整历史」没反应） |
 | `scripts/package-desktop.mjs` | 打包脚本：组装运行时 → 裁剪 → `cargo tauri build` → 启动验证 |
 | `reference/README.md` | 参考副本的说明（副本本身被 `.gitignore` 排除） |
@@ -60,13 +63,14 @@
 | `components/AppShell.tsx` | +574 / −204 | ① 三柱布局与顶栏那一行 ② **顶栏左端是会话标签条**（取代上游的扩展状态行），见下 ③ ⋯ 菜单（复用上游 `renderChatToolbarActions`）④ 信息面板只在中间弹出（几何按中间列矩形算）+ 全宽展开时为红绿灯留位 ⑤ 脚本侧栏开关只在收起后出现 ⑥ 收起时让开红绿灯宽度 ⑦ 设置入口改为左栏齿轮 |
 | `components/ChatWindow.tsx` | +52 / −123 | ① 删掉空会话头部的品牌行（logo + Pi Web + 版本号）② 消息列表加 `.chat-scroll-area`（常显滚动条）③ 删掉地图的引用（`ChatMinimap` / `useMessageRefs` 整个拿掉，所以上游 #941 给进程分组新加的 `ref` 也一并去掉，只留它的 `key`）④ 扩展弹窗标题区：fork 当初改成「可收缩 + 40vh」，合并上游时发现 #961 修的是同一个 bug（百分比 max-height 在内容撑开的容器里按规范等于 `none`），已改用上游的 `flexShrink: 1 + 50vh`，fork 那份退休 ⑤ 内联 `phaseLabel` 随上游抽到 `lib/chat-phase-label.ts`（多了 `isCompacting` 参数） |
 | `components/ExtensionStatusBar.tsx` | +26 / −15 | 抽出 `ExtensionStatusLine` 单独导出（仍只有一份实现）。**fork 起初把它放在中栏顶栏，现在那里改成了会话标签条，所以 `ExtensionStatusLine` 在 app 里已不再被渲染** —— 组件与 `ChatWindow` 上报 `extensionStatuses` 的那条链都留着，要重新露出（例如收进 ⋯ 菜单）不必复现数据流 |
-| `components/ChatInput.tsx` | +17 / −3 | ① 控制条中间槽从空 spacer 变成真居中槽（`contextSlot`）② 去掉为地图留的 `paddingRight: 52` |
+| `components/ChatInput.tsx` | +160 / −20 | ① 控制条中间槽从空 spacer 变成真居中槽（`contextSlot`）② 去掉为地图留的 `paddingRight: 52` ③ **「附加图片」改成「附加文件」**：选择器不再限 `image/*`；图片仍走原通道（压缩 + 缩略图），文本类注入正文（pi 格式的 `<file>` 块），其它类型暂存到本机后在消息里给 `@路径`；附件卡片、错误条、草稿里的 `files`、失败恢复都在这一个文件里（细节见第六节） |
 | `components/BranchNavigator.tsx` | +10 / −2 | ① 图标配色跟「是否展开」而不是「是否有内容」② 下拉高度上限 `min(520px, 可视剩余空间)` |
 | `components/MessageView.tsx` | +6 / −0 | 只有 2 条 `SAFETY:` 注释（说明 `ImageContent` 与 pi-ai 旧扁平 shape 的兼容读法）。早先删掉的流式 token 统计已按需恢复，所以净改动只剩注释 |
-| `lib/i18n/messages/{zh-CN,en,zh-TW}.ts` | +12 / −2 | 新增 12 个 key（`sidebar.viewSessions` `viewFiles` `newSession` `projects` `moreActions`、`session.cacheHitShort`、`chat.ctxUsage`、3 个 `sessionTab.*`、2 个 `tabStrip.*` 两条标签条共用的滚动按钮文案）；删掉 2 个地图 key |
+| `lib/draft-store.ts` | +25 / −6 | 草稿多一个可选的 `files`（非图片附件）。**为空时不写这个键** —— 上游测试会对整个草稿对象 `deepEqual`，多一个 `files: []` 就红了 |
+| `lib/i18n/messages/{zh-CN,en,zh-TW}.ts` | +36 / −2 | 新增 18 个 key（`sidebar.viewSessions` `viewFiles` `newSession` `projects` `moreActions`、`session.cacheHitShort`、`chat.ctxUsage`、3 个 `sessionTab.*`、2 个 `tabStrip.*` 两条标签条共用的滚动按钮文案、6 个 `chat.attach*` / `chat.attachment*` 附加文件文案）；删掉 2 个地图 key |
 | `app/layout.tsx` | +3 | 引入 `native-theme.css` |
 | `.gitignore` / `eslint.config.mjs` / `AGENTS.md` | 小 | 忽略规则（含打包产物）、lint 忽略 `desktop/src-tauri/{runtime,target,gen,icons}`、文档 |
-| 11 个 `*.test.mjs` | +231 / −124 | 断言随 UI 结构更新（其中 `AppShell.workspace-memory.test.mjs` 占大头） |
+| 11 个 `*.test.mjs` | +231 / −124 | 断言随 UI 结构更新（其中 `AppShell.workspace-memory.test.mjs` 占大头）；另有两个 fork 自己的测试文件 `lib/file-attachments.test.mjs`、`lib/attachment-staging.test.mjs` |
 
 ## 四、删除
 
@@ -87,7 +91,7 @@
    - `tauri.conf.json` 的 `productName`、`bundle.resources: ["runtime/"]` 仍在；
    - `main.rs` 里对 `runtime/app/...` 的路径假设仍成立；
    - `.on_new_window(...)` 仍在（没了的话，网页里的新窗口请求会被 WebView 静默丢弃）。
-6. **跑门禁**：`npx tsc --noEmit` → 0、`npx eslint .` → 0、`npm test`（1379 项）。
+6. **跑门禁**：`npx tsc --noEmit` → 0、`npx eslint .` → 0、`npm test`（1393 项）。
    注意 macOS 上要先 `TMPDIR=/private/tmp/pi-test-tmp npm test`（原因见 AGENTS.md 的 Quick Start）。
    界面上还有几条要人眼看的：红绿灯位置、左栏观感、滚动条。
 
@@ -121,6 +125,22 @@
   只把指向自己服务（`127.0.0.1`/`localhost` + 自己的端口）的请求交给 `/usr/bin/open`
   （系统默认浏览器），再用 `NewWindowResponse::Deny` 收尾。网页侧一行没改，
   所以在普通浏览器里仍然是开自己的标签页。
+- **pi 的附件通道只有图片。** `AgentSession.prompt(text, images)` 只收 `ImageContent{type:"image",data,mimeType}`
+  （官方 CHANGELOG 里写了 `attachments` 字段被 `images` 取代），所以非图片文件要么注入正文（文本类），
+  要么只给路径（其它）。而且各家 provider 对非图片 `mimeType` 的态度完全不同：Google 的
+  `inlineData` 任意 mimeType 都收；Anthropic 只认图片（PDF 要 `document` 块，pi 不发）；
+  OpenAI 官方会拒。所以别把「把 PDF 塞进 images 数组」当成能用。
+- **文本注入到正文有大小门槛。** `MAX_INLINE_TEXT_BYTES`（= 上游的 `TEXT_PREVIEW_MAX_BYTES`，256KB）
+  以上的文本文件改走「本地文件 + `@路径`」—— 10MB 的日志直接注进去会当场把上下文顶爆。
+- **`runBuiltinCommand` 里不能加 `attachedFiles`。** 上游那个测试（“locks built-in command submission
+  until it settles”）会把这段回调的源码抽出来丢进一个固定 vm 上下文里跑，拿不到的变量会直接抛。
+  fork 的附件拦截放在两个调用点（`handleSend` / `sendQueued`），回调本身保持上游原样。
+- **发送失败后的恢复靠一个 ref，不动 `hooks/useAgentSession.ts`。** 上游的 `restoreSubmission`
+  只带 `text` + `images`，而 fork 的附件和「用户原始输入」都只存在 `lastSubmittedFilesRef` 里
+  （按实际发出去的正文匹配）。这样 `useAgentSession.ts` 保持对上游 0 差异，否则每次合上游都要再碰一次。
+  附带一个副作用：失败恢复时输入框里是**用户原文**，不是注入了 `<file>` 块的那份正文。
+- **暂存目录是 `~/.pi/attachments/`，不会自动清理。** 拖过的文件会一直留着（名字带时间戳前缀，
+  方便辨认和手动删），没做定期删除 —— 删用户文件这种事不能默默干。
 
 ---
 

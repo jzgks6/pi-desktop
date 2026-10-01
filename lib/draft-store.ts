@@ -2,6 +2,7 @@ import {
   MAX_ATTACHED_IMAGES,
   isBase64ImageWithinLimits,
 } from "./image-attachments";
+import { isChatDraftFile, type ChatDraftFile } from "./file-attachments";
 
 export interface ChatDraftImage {
   data: string;
@@ -11,19 +12,22 @@ export interface ChatDraftImage {
 export interface ChatDraft {
   value: string;
   images: ChatDraftImage[];
+  /** 非图片附件（fork）。空的时候不写这个键，草稿对象的形状与上游一致。 */
+  files?: ChatDraftFile[];
 }
 
 const drafts = new Map<string, ChatDraft>();
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
-  return {
-    value: draft.value,
-    images: draft.images.map((image) => ({ ...image })),
-  };
+  const images = draft.images.map((image) => ({ ...image }));
+  const files = (draft.files ?? []).map((file) => ({ ...file }));
+  return files.length > 0
+    ? { value: draft.value, images, files }
+    : { value: draft.value, images };
 }
 
 function isEmptyDraft(draft: ChatDraft): boolean {
-  return !draft.value && draft.images.length === 0;
+  return !draft.value && draft.images.length === 0 && (draft.files?.length ?? 0) === 0;
 }
 
 export function getDraft(key: string): ChatDraft | null {
@@ -54,22 +58,27 @@ export function mergeRestoredSubmissionDraft(
   submittedImages: ChatDraftImage[] | undefined,
   currentText: string,
   currentImages: ChatDraftImage[],
+  submittedFiles: ChatDraftFile[] = [],
+  currentFiles: ChatDraftFile[] = [],
 ): ChatDraft {
   const images = [...(submittedImages ?? []), ...currentImages]
     .filter(isBase64ImageWithinLimits)
     .slice(0, MAX_ATTACHED_IMAGES)
     .map(({ data, mimeType }) => ({ data, mimeType }));
+  const files = [...submittedFiles, ...currentFiles]
+    .filter(isChatDraftFile)
+    .slice(0, MAX_ATTACHED_IMAGES)
+    .map((file) => ({ ...file }));
+  const value = mergeRestoredSubmissionText(submittedText, currentText);
 
-  return {
-    value: mergeRestoredSubmissionText(submittedText, currentText),
-    images,
-  };
+  return files.length > 0 ? { value, images, files } : { value, images };
 }
 
 export function restoreDraftSubmission(
   key: string,
   text: string,
   images?: ChatDraftImage[],
+  files?: ChatDraftFile[],
 ): ChatDraft {
   const current = getDraft(key) ?? { value: "", images: [] };
   const restored = mergeRestoredSubmissionDraft(
@@ -77,6 +86,8 @@ export function restoreDraftSubmission(
     images,
     current.value,
     current.images,
+    files ?? [],
+    current.files ?? [],
   );
   setDraft(key, restored);
   return restored;
@@ -98,7 +109,14 @@ export function rekeyDraft(
   if (!previous) return next;
 
   const merged = next
-    ? mergeRestoredSubmissionDraft(next.value, next.images, previous.value, previous.images)
+    ? mergeRestoredSubmissionDraft(
+        next.value,
+        next.images,
+        previous.value,
+        previous.images,
+        next.files ?? [],
+        previous.files ?? [],
+      )
     : previous;
   setDraft(nextKey, merged);
   return cloneDraft(merged);
