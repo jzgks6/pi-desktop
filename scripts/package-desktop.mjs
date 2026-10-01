@@ -332,7 +332,14 @@ function stepAssemble() {
   // 2) 启动器与包元数据
   copyTree(join(REPO, "bin"), join(APP_DIR, "bin"));
   copyFileSync(join(REPO, "package.json"), join(APP_DIR, "package.json"));
-  log("bin/ package.json");
+  // next.config.ts 不只是构建期配置 —— Next 运行时的代理层也从它读东西：
+  //   · proxyClientMaxBodySize：默认 10MB，超过就把请求体截断（multipart 报
+  //     "expected boundary after body" → 500）。「附加文件」允许 100MB，
+  //     9 月这版就是因为漏拷这个文件，>10MB 的文件必定失败。
+  //   · headers()：/ 的 no-cache、/sw.js 的 Service-Worker-Allowed 也靠它。
+  // Next 自己会用 SWC 把 .ts 配置编译出来，不需要包里有 typescript。
+  copyFileSync(join(REPO, "next.config.ts"), join(APP_DIR, "next.config.ts"));
+  log("bin/ package.json next.config.ts");
 
   // 3) 构建产物：只丢 cache —— 那 536M 是构建期缓存，运行时用不到；
   //    trace / trace-build / diagnostics / types 同理，只有分析工具会读；
@@ -380,6 +387,27 @@ function stepAssemble() {
   }
   log(`运行时合计 ${mb(total)}`);
   assertRuntimeMatchesBuild();
+  assertRuntimeHasNextConfig();
+}
+
+/**
+ * 运行时的 next.config.ts 必须在，而且得带着那个请求体上限。
+ *
+ * 这个文件以前只在构建时被读到，所以“组装”漏拷它没人发现 —— 直到 app 里第一次
+ * 传一个大文件。补上它 + 这道闸，以后换个打包方式也不会静默退回去。
+ */
+function assertRuntimeHasNextConfig() {
+  const configPath = join(APP_DIR, "next.config.ts");
+  if (!existsSync(configPath)) {
+    throw new Error(
+      "运行时缺少 next.config.ts：app 会退回 Next 默认配置" +
+        "（10MB 请求体上限 + headers() 全丢），>10MB 的上传会变成 500",
+    );
+  }
+  if (!/proxyClientMaxBodySize/.test(readFileSync(configPath, "utf8"))) {
+    throw new Error("运行时的 next.config.ts 里没有 proxyClientMaxBodySize，大文件上传会被截断");
+  }
+  log("next.config.ts 已进包（含 proxyClientMaxBodySize）");
 }
 
 /**

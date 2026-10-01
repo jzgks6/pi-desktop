@@ -112,10 +112,15 @@
 - **红绿灯位置在 `desktop/src-tauri/src/main.rs`**，`traffic_light_position` 的第二个参数
   **不是「距顶部的距离」**：AppKit 左下原点、tao 只改按钮的 X，所以该值使按钮整体下移，
   斜率正好 1。当前标定与历史写在代码注释里。
-- **打包脚本的三道闸别删**：① 组装运行时不会被别的开关顺带跳过（只能用 `--reuse-runtime` 显式要求）；
+- **打包脚本的四道闸别删**：① 组装运行时不会被别的开关顺带跳过（只能用 `--reuse-runtime` 显式要求）；
   ② 运行时的 `.next/BUILD_ID` 必须与仓库一致；③ **node 必须按「复制到 `runtime/bin/` 之后
   仍能跑」验收**（homebrew 的 node 26+ 是共享库构建，原地跑得好好的，单独复制就 dyld 缺库，
-  包能打出来但 app 永远停在启动页）。三条都是「app 里跑的不是这份源码」之后加的。
+  包能打出来但 app 永远停在启动页）；④ **运行时的 `next.config.ts` 必须在，且带着
+  `proxyClientMaxBodySize`**。第④条是「附加文件」踩出来的：这个文件以前只在构建时被读到，
+  组装漏拷也没人发现 —— 直到 app 里传一个大于 10MB 的文件。Next 的代理层默认把请求体
+  截在 10MB，截断后 multipart 解析失败，前端只会看到一句 `HTTP 500`（服务端日志里是
+  `expected boundary after body`）。它同时也是 `headers()` 的来源（`/` 的 no-cache、
+  `/sw.js` 的 `Service-Worker-Allowed`），漏了就一并丢了。
 - **改 `productName` 后 `cargo tauri build` 不会删旧包**，`bundle/macos` 下会新旧并存；
   按名字挑产物的地方（含脚本的验证步）可能挑到旧的，脚本现在会自动清掉。
 - **WebView 不会自己开新窗口。** WKWebView 通过 `createWebViewWith` 问宿主，而 wry 只在应用

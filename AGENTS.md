@@ -225,12 +225,17 @@ Flags: `--skip-build`, `--reuse-runtime`, `--assemble-only`, `--skip-tauri`, `--
 `--bundles=<app|dmg>`, `--force-icons`, `--debug`, plus `PI_DESKTOP_NODE=<path>` to pick
 the node binary that gets bundled.
 
-Two guards, both added after real failures:
+Four guards, each added after a real failure:
 
 * assembling the runtime is never skipped as a side effect of another flag — it is
   opt-in via `--reuse-runtime` (a stale runtime once shipped a component that had already
-  been deleted from the source), and
-* the runtime's `.next/BUILD_ID` must equal the repo's, otherwise packaging aborts.
+  been deleted from the source),
+* the runtime's `.next/BUILD_ID` must equal the repo's, otherwise packaging aborts,
+* `runtime/bin/node` is verified **after being copied** (a shared-library node builds happily
+  in place and then cannot start from the bundle), and
+* `runtime/app/next.config.ts` must exist and carry `proxyClientMaxBodySize` — Next reads that
+  config at **runtime**, not just at build time, and without it the proxy truncates every request
+  body at 10MB (large attachment uploads become a bare `HTTP 500`, and `headers()` is lost too).
 
 **The webview cannot open new windows on its own.** WKWebView asks its host through
 `createWebViewWith`, wry answers only when the app registered `WebviewWindowBuilder::on_new_window`,
