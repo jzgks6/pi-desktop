@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "pi desktop 只给主窗口一项额外权限：打开原生文件选择对话框（用于 composer 的「附加文件」）。",
+  "windows": ["main"],
+  "permissions": ["dialog:allow-open"]
+}

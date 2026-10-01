@@ -22,12 +22,15 @@ import {
   MAX_LOCAL_FILE_BYTES,
   classifyAttachmentFile,
   composeOutgoingMessage,
+  fileFromBase64,
   formatAttachmentSize,
+  inspectPickedPaths,
   isChatDraftFile,
   isImageAttachmentFile,
   stageAttachmentFile,
   type ChatDraftFile,
 } from "@/lib/file-attachments";
+import { hasDesktopFilePicker, pickFilesWithDesktopDialog } from "@/lib/desktop-file-picker";
 import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
@@ -829,8 +832,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           const next = [
             ...restored,
             ...current.filter((file) => !restored.some((kept) => (
-              kept.kind === file.kind && kept.name === file.name
-              && kept.path === file.path && kept.text === file.text
+              kept.kind === file.kind && kept.name === file.name && kept.path === file.path
             ))),
           ];
           attachedFilesRef.current = next;
@@ -973,9 +975,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           void processImageFiles([file]);
           continue;
         }
-        accepted.push(classification.kind === "text"
-          ? { kind: "text", name: file.name, size: file.size, text: classification.text }
-          : { kind: "local", name: file.name, size: file.size, path: await stageAttachmentFile(file) });
+        accepted.push({ kind: "local", name: file.name, size: file.size, path: await stageAttachmentFile(file) });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         notice = t("chat.attachmentFailed", { name: file.name, message });
@@ -992,6 +992,66 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
     setAttachmentError(notice);
   }, [compact, processImageFiles, t]);
+
+  /**
+   * 桌面壳里用**原生**文件选择窗口拿真实路径（fork）：
+   * 图片从本地读回字节走原来的图片通道，其它类型只写 `@原路径` —— 不拷贝、**不检测大小**。
+   */
+  const attachPickedPaths = useCallback(async (paths: string[]) => {
+    if (paths.length === 0) return;
+    let notice: string | null = null;
+    try {
+      const inspected = await inspectPickedPaths(paths);
+      const imageFiles: File[] = [];
+      const linked: ChatDraftFile[] = [];
+      for (const entry of inspected) {
+        if (entry.error) {
+          notice = t("chat.attachmentFailed", { name: entry.name, message: entry.error });
+          continue;
+        }
+        if (entry.kind === "image" && entry.data && entry.mimeType) {
+          imageFiles.push(fileFromBase64(entry.name, entry.mimeType, entry.data));
+          continue;
+        }
+        // 引用原路径：没有暂存、没有大小上限。
+        linked.push({ kind: "link", name: entry.name, size: entry.size, path: entry.path });
+      }
+      if (imageFiles.length > 0) void processImageFiles(imageFiles);
+      if (linked.length > 0) {
+        setAttachedFiles((prev) => {
+          const available = Math.max(0, MAX_ATTACHED_IMAGES - prev.length);
+          if (available === 0) {
+            notice = t("chat.attachmentLimitReached", { count: MAX_ATTACHED_IMAGES });
+            return prev;
+          }
+          const next = [...prev, ...linked.slice(0, available)];
+          attachedFilesRef.current = next;
+          return next;
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      notice = t("chat.attachmentFailed", { name: paths[0], message });
+    }
+    if (notice) setAttachmentError(notice);
+  }, [processImageFiles, t]);
+
+  /** 回形针：桌面壳走原生对话框，普通浏览器回落 `<input type=file>`（拷一份暂存）。 */
+  const handleAttachClick = useCallback(async () => {
+    if (compact) return;
+    if (!hasDesktopFilePicker()) {
+      fileInputRef.current?.click();
+      return;
+    }
+    try {
+      const paths = await pickFilesWithDesktopDialog(t("chat.attachFile"));
+      if (!paths || paths.length === 0) return; // null：非桌面环境；[]：用户取消
+      await attachPickedPaths(paths);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAttachmentError(t("chat.attachmentFailed", { name: "", message }));
+    }
+  }, [attachPickedPaths, compact, t]);
 
   const removeFile = useCallback((index: number) => {
     setAttachedFiles((prev) => {
@@ -1988,23 +2048,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 title={file.path ?? file.name}
               >
                 <span className="chat-file-chip-icon" aria-hidden="true">
-                  {file.kind === "text" ? (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                      <polyline points="14 2 14 8 20 8" />
-                      <line x1="8" y1="13" x2="16" y2="13" />
-                      <line x1="8" y1="17" x2="13" y2="17" />
-                    </svg>
-                  ) : (
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-                    </svg>
-                  )}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                  </svg>
                 </span>
                 <span className="chat-file-chip-body">
                   <span className="chat-file-chip-name">{file.name}</span>
                   <span className="chat-file-chip-meta">
-                    {file.kind === "text" ? t("chat.attachedTextFile") : t("chat.attachedLocalFile")}
+                    {file.kind === "link" ? t("chat.attachedLinkedFile") : t("chat.attachedLocalFile")}
                     {" · "}
                     {formatAttachmentSize(file.size)}
                   </span>
@@ -2537,7 +2588,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
           <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
             <button
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => void handleAttachClick()}
              title={t("chat.attachFile")}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",

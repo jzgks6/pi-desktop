@@ -398,6 +398,10 @@ fn stop_server(app: &tauri::AppHandle) {
 
 fn main() {
     tauri::Builder::default()
+        // 只为了给 composer 的「附加文件」开一个**原生**文件选择窗口（拿真实路径，
+        // 字节不经 HTTP）。网页侧通过 window.__TAURI_INTERNALS__.invoke("plugin:dialog|open") 调用，
+        // 普通浏览器里没有这个对象，会自己回落到 <input type=file>。
+        .plugin(tauri_plugin_dialog::init())
         .menu(build_menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             // 前两个与 ⌘, 是给网页侧的命令：macOS 上这几个键会被应用菜单先吃掉，页面根本

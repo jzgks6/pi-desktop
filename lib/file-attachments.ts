@@ -1,48 +1,44 @@
 /**
- * 非图片附件的识别与注入（fork）。
+ * 非图片附件的「@路径」处理（fork）。
  *
- * 上游的附件通道只有图片（pi 的 `prompt(text, images)` 只收 `ImageContent`），
- * 所以 composer 里的「附加文件」走两条路：
+ * 规则只有两条，保持一致：
  *
- *   1. 文本类（UTF-8 能解码、不含 NUL）→ 直接注入消息正文，包成 pi 自己的
- *      `<file name="…">内容</file>` 形式（与 pi CLI 的 `@file` 完全一致，
- *      见 pi-coding-agent 的 `cli/file-processor.js`）。任何模型都能真读到。
- *   2. 其它（PDF/docx/xlsx/zip…）→ 原始字节**不进**模型上下文，只在本地暂存
- *      （`~/.pi/attachments/`，见 `lib/attachment-staging.ts`），消息里给一个
- *      `@绝对路径`，让模型用它自己的本地工具去读。
+ *   · **图片** —— 走上游原来的通道（客户端压缩 + 缩略图 + `images` 参数）；
+ *   · **其它一切**（PDF、docx、zip、小文本…）—— 一律只写 `@绝对路径`，一个字节
+ *     都不进模型上下文，让模型用它自己的本地工具去读。
  *
- * 图片仍然走原来的 images 通道（压缩 + 缩略图），这里不碰。
+ * 路径从哪来：
+ *   · 桌面壳（app）—— 原生文件选择窗口直接给真实路径，**不拷贝、无大小上限**
+ *     （`kind: "link"`）；
+ *   · 普通浏览器 —— WebView 拿不到路径，只能把文件拷一份到 `~/.pi/attachments/`
+ *     再引用副本（`kind: "local"`，见 `lib/attachment-staging.ts`），因此那条路
+ *     仍有暂存上限。
  */
-import { TEXT_PREVIEW_MAX_BYTES, getImageMime } from "./file-types";
+import { getImageMime } from "./file-types";
 
 /** 图片仍然用上游的上限（10MB，客户端还会压缩）。 */
 export const MAX_ATTACHED_IMAGE_BYTES = 10 * 1024 * 1024;
 
 /**
- * 「本地文件」那条路（不占上下文，只是拷一份到本机）的单个文件上限。
- * 比图片大得多 —— 大文件正是这条路存在的理由。
+ * 浏览器里「拷贝暂存」那条路的单文件上限（app 里走原生路径不受此限）。
  */
 export const MAX_LOCAL_FILE_BYTES = 100 * 1024 * 1024;
 
 /**
- * 超过这个大小的文本文件不再注入正文，改走「本地文件 + @路径」。
- * 10MB 的文本注入正文会直接把上下文顶爆，所以这里跟预览上限保持一致（256KB）。
+ * `local` —— 浏览器里挑的：拷了一份到 `~/.pi/attachments/`（受暂存上限约束）；
+ * `link`  —— 桌面壳原生对话框挑的：**不拷贝**，直接引用原路径（**无大小上限**）。
  */
-export const MAX_INLINE_TEXT_BYTES = TEXT_PREVIEW_MAX_BYTES;
-
-export type AttachmentFileKind = "text" | "local";
+export type AttachmentFileKind = "local" | "link";
 
 /** 非图片附件的草稿形态（内存草稿 + 发送失败时的恢复都用它）。 */
 export interface ChatDraftFile {
   kind: AttachmentFileKind;
-  /** 原始文件名，用于 `<file name>` 与附件卡片。 */
+  /** 文件名，用于附件卡片。 */
   name: string;
-  /** 原始字节数。 */
+  /** 原始字节数（仅用于显示；link 不因此受限）。 */
   size: number;
-  /** `kind === "text"`：已解码的正文（发送时注入消息）。 */
-  text?: string;
-  /** `kind === "local"`：本地暂存后的绝对路径（发送时以 @路径 形式给出）。 */
-  path?: string;
+  /** 绝对路径（发送时以 `@路径` 形式给出）。 */
+  path: string;
 }
 
 export function formatAttachmentSize(bytes: number): string {
@@ -61,18 +57,18 @@ export function formatAttachmentSize(bytes: number): string {
 export function isChatDraftFile(value: unknown): value is ChatDraftFile {
   if (!value || typeof value !== "object") return false;
   const file = value as Partial<ChatDraftFile>;
-  if (file.kind !== "text" && file.kind !== "local") return false;
+  if (file.kind !== "local" && file.kind !== "link") return false;
   if (typeof file.name !== "string" || file.name.length === 0) return false;
+  if (typeof file.path !== "string" || file.path.length === 0) return false;
   if (typeof file.size !== "number" || !Number.isFinite(file.size) || file.size < 0) return false;
-  if (file.kind === "text") {
-    return typeof file.text === "string" && file.size <= MAX_INLINE_TEXT_BYTES;
-  }
-  return typeof file.path === "string" && file.path.length > 0 && file.size <= MAX_LOCAL_FILE_BYTES;
+  // `link` 引用的是用户自己选的原始文件（不拷贝、不上限）；
+  // `local` 是浏览器里暂存的那份副本，仍需守住暂存上限。
+  return file.kind === "link" || file.size <= MAX_LOCAL_FILE_BYTES;
 }
 
 /**
  * 图片判定：优先用浏览器给的 MIME。拿不到 MIME 时按扩展名兜底。
- * SVG 排除在外 —— 它是文本，各家 provider 都不把它当图片收。
+ * SVG 排除在外 —— 它是文本，各家 provider 都不把它当图片收，走 `@路径` 更好。
  */
 export function isImageAttachmentFile(type: string | undefined, name: string): boolean {
   const mime = (type ?? "").toLowerCase();
@@ -82,48 +78,37 @@ export function isImageAttachmentFile(type: string | undefined, name: string): b
   return getImageMime(name) !== null;
 }
 
-const TEXT_SNIFF_BYTES = 8192;
+export type AttachmentFileClassification = { kind: "image" } | { kind: "local" };
 
-/**
- * 二进制嗅探：看文件头有没有 NUL，以及是不是合法 UTF-8。
- * 只做判定，不产出文本 —— 大文件不必为此解码整份内容。
- */
-export function looksLikeTextBytes(bytes: Uint8Array): boolean {
-  if (bytes.length === 0) return true;
-  const sample = bytes.subarray(0, TEXT_SNIFF_BYTES);
-  if (sample.includes(0)) return false;
-
-  // 样例可能正好截断在多字节字符中间：退 1~3 字节再试。
-  for (let trim = 0; trim <= 3 && trim < sample.length; trim += 1) {
-    try {
-      new TextDecoder("utf-8", { fatal: true }).decode(sample.subarray(0, sample.length - trim));
-      return true;
-    } catch {
-      // 继续退
-    }
-  }
-  return false;
+/** 给一个文件分类：图片交回上游的图片通道，其余一律走「本地路径」。 */
+export function classifyAttachmentFile(input: {
+  name: string;
+  type?: string;
+  bytes: Uint8Array;
+}): AttachmentFileClassification {
+  if (isImageAttachmentFile(input.type, input.name)) return { kind: "image" };
+  return { kind: "local" };
 }
 
-/** 按 UTF-8 解码并去掉 BOM（与 pi 的 `stripBom` 行为一致）。 */
-export function decodeTextBytes(bytes: Uint8Array): string {
-  const text = new TextDecoder("utf-8").decode(bytes);
-  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-}
-
-/** pi 的 `<file>` 文本块，格式与 `cli/file-processor.js` 逐字对齐。 */
-export function formatFileTextBlock(name: string, content: string): string {
-  return `<file name="${name}">\n${content}\n</file>\n`;
-}
-
-/** 本地文件引用：pi 的 `@路径` 提及形式。 */
+/** pi 的 `@路径` 提及形式（每条一行）。 */
 export function formatLocalFileMention(path: string): string {
   return `@${path}\n`;
 }
 
 /**
+ * 拼出真正发给模型的正文：`@路径` 在前、用户输入在后（与 pi 的
+ * `buildInitialMessage` 顺序一致）。图片不在这一层，走 `images` 参数。
+ */
+export function composeOutgoingMessage(text: string, files: ChatDraftFile[] | undefined): string {
+  if (!files || files.length === 0) return text;
+  const mentions = files.map((file) => formatLocalFileMention(file.path)).join("");
+  if (!mentions) return text;
+  return text ? `${mentions}${text}` : mentions.trimEnd();
+}
+
+/**
  * 把文件落到本地暂存目录（服务端写入 `~/.pi/attachments/`），返回绝对路径。
- * 原始字节不进模型上下文，消息里只给这个路径。
+ * 只有普通浏览器需要它 —— 桌面壳用原生路径，不拷贝。
  */
 export async function stageAttachmentFile(file: File): Promise<string> {
   const body = new FormData();
@@ -141,39 +126,42 @@ export async function stageAttachmentFile(file: File): Promise<string> {
   return path;
 }
 
-export type AttachmentFileClassification =
-  | { kind: "image" }
-  | { kind: "text"; text: string }
-  | { kind: "local" };
-
-/**
- * 给一个文件分类：图片交回上游的图片通道，文本注入正文，其它作为本地文件引用。
- */
-export function classifyAttachmentFile(input: {
+export interface InspectedPathFile {
+  path: string;
   name: string;
-  type?: string;
-  bytes: Uint8Array;
-}): AttachmentFileClassification {
-  if (isImageAttachmentFile(input.type, input.name)) return { kind: "image" };
-  if (input.bytes.byteLength <= MAX_INLINE_TEXT_BYTES && looksLikeTextBytes(input.bytes)) {
-    return { kind: "text", text: decodeTextBytes(input.bytes) };
-  }
-  return { kind: "local" };
+  size: number;
+  kind: "image" | "file";
+  mimeType?: string;
+  data?: string;
+  error?: string;
 }
 
 /**
- * 拼出真正发给模型的正文：附件块在前、用户输入在后（与 pi 的
- * `buildInitialMessage` 顺序一致）。图片不在这一层，走 `images` 参数。
+ * 把桌面壳选中的路径交给服务端识别：图片会带回 base64（走原来的图片通道），
+ * 其它类型只回元数据（网页只写 `@路径`，字节不过网）。
  */
-export function composeOutgoingMessage(text: string, files: ChatDraftFile[] | undefined): string {
-  if (!files || files.length === 0) return text;
-  const blocks = files
-    .map((file) => (file.kind === "text"
-      ? formatFileTextBlock(file.name, file.text ?? "")
-      : file.path
-        ? formatLocalFileMention(file.path)
-        : ""))
-    .join("");
-  if (!blocks) return text;
-  return text ? `${blocks}${text}` : blocks.trimEnd();
+export async function inspectPickedPaths(paths: string[]): Promise<InspectedPathFile[]> {
+  const response = await fetch("/api/attachments/inspect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paths }),
+  });
+  const payload = await response.json().catch(() => null) as
+    | { files?: InspectedPathFile[]; error?: unknown }
+    | null;
+  if (!response.ok) {
+    const error = typeof payload?.error === "string" ? payload.error : `HTTP ${response.status}`;
+    throw new Error(error);
+  }
+  return Array.isArray(payload?.files) ? payload.files : [];
+}
+
+/** 把 base64 还原成 `File`，让图片重新走一遍上游的压缩 + 预览通道。 */
+export function fileFromBase64(name: string, mimeType: string, data: string): File {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new File([bytes], name, { type: mimeType });
 }

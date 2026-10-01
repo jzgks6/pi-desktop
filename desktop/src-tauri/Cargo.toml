@@ -10,6 +10,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# composer 的「附加文件」要一个**原生**文件选择窗口 —— WebView 里的 <input type=file>
+# 拿不到文件的真实路径，没有路径就只能把字节拷一份过去（那就必然要有大小上限）。
+# 用官方 dialog 插件只为拿路径：返回路径后自己分类（图片交给网页的图片通道，
+# 其余直接 @原路径），一个字节都不经过 HTTP。
+tauri-plugin-dialog = "2"
 
 # 只为 macOS 打包；不引 shell 插件 —— 拉起 node 用 std::process::Command 就够，
 # 少一个依赖就少一层 capabilities 配置。

@@ -122,10 +122,12 @@ lib/
   node-cli.ts          locate bundled npm-cli.js / npx-cli.js so npm/npx spawn without a shell (Windows npm.cmd)
   npx.ts               npx runner used by skill install
   chat-phase-label.ts  phaseLabel(phase, t, compacting) — status text for the chat phase
-  file-attachments.ts  (fork) attachment intake: binary/text sniffing, image vs text vs local-file
-                       classification, pi-style `<file name="…">` blocks, `@path` references and the
-                       outgoing-message composition used by the composer
-  attachment-staging.ts (fork) server-side naming for staged attachments (`~/.pi/attachments/`)
+  file-attachments.ts  (fork) attachment intake: image vs non-image classification, `@path` mentions,
+                       the outgoing-message composition used by the composer, and the path-based
+                       inspection helpers for the native picker
+  desktop-file-picker.ts (fork) native file dialog + image magic-byte sniffing (no-op in a browser)
+  attachment-staging.ts (fork) server-side naming for staged attachments (`~/.pi/attachments/`,
+                       only used by the browser fallback)
   open-in-file-manager.ts  platform label + server-side reveal helper for /api/open-in-explorer
   plugin-updates.ts    npm view update checks for /api/plugins/check
   pi-types.ts          local structural types for pi SDK objects
@@ -173,22 +175,33 @@ hooks/
 
 ## Attachments (fork)
 
-The composer's paperclip accepts any file. images keep the upstream pipeline (client compression,
-10 max, `ImageContent` blocks). Everything else splits in two, because pi's protocol only has image
-tattachments (`prompt(text, images)`) and providers disagree about non-image inline data:
+The composer's paperclip has exactly two rules:
 
-- **text-like files** (valid UTF-8, no NUL, ≤ `MAX_INLINE_TEXT_BYTES` = 256KB) are decoded and
-  injected into the message as pi's own `<file name="…">…</file>` block — the same shape
-  `pi-coding-agent`'s `cli/file-processor.js` produces for `@file`, so every model can read them;
-- **everything else** (PDF, docx, xlsx, oversized text, anything unrecognised) is staged to
-  `~/.pi/attachments/<timestamp>-<name>` by `POST /api/attachments` (≤ `MAX_LOCAL_FILE_BYTES` = 100MB)
-  and referenced in the message as `@/abs/path`; the bytes never enter the model context — the model
-  uses its own local tools (`read`, shell, extensions) instead. There is no rejection path: whatever
-  the picker returns ends up in one of these two buckets.
+- **images** keep the upstream pipeline (client compression, 10 max, `ImageContent` blocks);
+- **everything else** — PDF, docx, zip, and small text files too — is referenced in the message as a
+  single `@/abs/path` line per file. The bytes never enter the model context; the model uses its own
+  local tools (`read`, shell, extensions). There is no text-inlining path (removed on request).
 
-The picker itself is the browser's own `<input type="file">` (the paperclip), with **no `accept`
-filter** so the native dialog offers every file. The picked file is always copied — a page cannot
-learn a picked file's original path — so the message references the staged copy.
+Where the path comes from decides whether anything is copied:
+
+- **desktop app** — the paperclip opens a **native** file dialog (`plugin:dialog|open` through
+  `window.__TAURI_INTERNALS__`, see `lib/desktop-file-picker.ts` + `capabilities/default.json`'s
+  `dialog:allow-open`). Real paths, `kind: "link"`, **no copy and no size check at all**; images are
+  read back through `POST /api/attachments/inspect` (magic-byte sniff, ≤10MB) and handed to the same
+  image pipeline as before.
+- **plain browser** — a page cannot learn a picked file's path, so non-images are copied to
+  `~/.pi/attachments/<timestamp>-<name>` by `POST /api/attachments` and referenced as `@那副本`
+  (`kind: "local"`, bounded by `MAX_LOCAL_FILE_BYTES` = 100MB).
+
+The message the model sees is `composeOutgoingMessage(typed, files)` — `@path` lines first, then the
+user's text. A send failure restores the **typed** text plus the attachment chips from
+`lastSubmittedFilesRef` in `ChatInput.tsx`; `hooks/useAgentSession.ts` stays byte-identical to
+upstream, which is why the files ride a ref instead of its `restoreSubmission` signature. Staged files
+are never cleaned up automatically.
+
+Drag-and-drop inside the app still goes through the browser path (a copy) — Tauri *does* expose real
+paths for drops via `tauri://drag-drop`, so routing them into the `link` path is a cheap follow-up if
+wanted.
 
 The message the model sees is `composeOutgoingMessage(typed, files)`: attachment blocks first, then
 the typed text (matching `buildInitialMessage`). A send failure restores the **typed** text plus the
