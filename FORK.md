@@ -2,7 +2,7 @@
 
 上游：`https://github.com/agegr/pi-web`，本 fork 的基线是 **`96966e5`**。
 下面这份清单的规模用这条命令量（`upstream/main` 已经并进来了，所以量到的就是 fork 自己那部分）：
-`git diff --stat upstream/main HEAD` → **60 个文件**（+11547 / −1897）。
+`git diff --stat upstream/main HEAD` → **64 个文件**（+12043 / −1898）。
 
 > **当前状态**：本 fork 的 `main` 压在上游 `7303179` 之上 —— 比基线 `96966e5` 多 12 个上游提交
 > （`fd037e4` / `6a1246e` / `433d09e`，加上后来 merge 进来的 9 个，均已完整保留），
