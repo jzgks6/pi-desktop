@@ -2,11 +2,11 @@
 
 上游：`https://github.com/agegr/pi-web`，本 fork 的基线是 **`96966e5`**。
 下面这份清单的规模用这条命令量（`upstream/main` 已经并进来了，所以量到的就是 fork 自己那部分）：
-`git diff --stat upstream/main HEAD` → **64 个文件**（+12043 / −1898）。
+`git diff --stat upstream/main HEAD` → **65 个文件**（+12057 / −1900）。
 
-> **当前状态**：本 fork 的 `main` 压在上游 `7303179` 之上 —— 比基线 `96966e5` 多 12 个上游提交
-> （`fd037e4` / `6a1246e` / `433d09e`，加上后来 merge 进来的 9 个，均已完整保留），
-> fork 自己 4 个提交 + 1 个 merge commit 叠在它们上面。
+> **当前状态**：本 fork 的 `main` 压在上游 `d733d43` 之上 —— 比基线 `96966e5` 多 62 个上游提交
+> （`fd037e4` / `6a1246e` / `433d09e`，加上后来 merge 进来的 9 个与 50 个，均已完整保留），
+> fork 自己 12 个提交 + 2 个 merge commit 叠在它们上面。
 > 上游再更新时，按第五节把这里的改动重新叠一次。
 
 改动性质：把界面改成 IDE 式三栏 + 顶栏会话标签条、加一个 macOS 桌面外壳。**没有动任何业务逻辑**
@@ -49,7 +49,7 @@
 | `components/ContextUsageRing.tsx` | 从上游移植的圆环，加了 `decorative` 模式（避免 button 嵌套 button） |
 | `design-prototypes/sessions-sidebar.html` | 左栏的设计稿（仅存档，无代码作用） |
 | `app/api/attachments/route.ts` | `POST /api/attachments`：把**浏览器里**挑的非图片文件暂存到 `~/.pi/attachments/`，只回传绝对路径（原始字节不进模型上下文）。放在 `~/.pi/` 而不是会话工作区，否则会污染项目目录与 git 状态。app 里用不到（原生对话框直接给真实路径） |
-| `app/api/attachments/inspect/route.ts` | `POST /api/attachments/inspect`：按**路径**识别桌面对话框选中的文件 —— 图片（看魔数，≤1 0MB）带回 base64 走图片通道，其余只回元数据 |
+| `app/api/attachments/inspect/route.ts` | `POST /api/attachments/inspect`：按**路径**识别桌面对话框选中的文件 —— 图片（看魔数，≤10MB）带回 base64 走图片通道，其余只回元数据 |
 | `desktop/`（8 个文件） | macOS 外壳：Tauri 工程 + 启动页 + 说明，详见 `desktop/README.md`。`src/main.rs` 里还建了一份应用菜单，注册三个原生快捷键：**⌘T** 新建空白会话标签、**⌘W** 关闭当前标签、**⌘,** 打开设置。三者都只把命令 `eval` 成 CustomEvent 交给网页（见 `hooks/useDesktopMenuCommands.ts`）。菜单里**不能**再放「关闭窗口」（默认菜单那个 ⌘W 必须拿掉，否则两个 ⌘W 打架；现在 ⌘W 完全不碰窗口）；编辑菜单必须留着，否则输入框里的 ⌘C/⌘V/⌘A 会失效」。另外 `main.rs` 注册了 `on_new_window`，把指向自己服务的新窗口请求交给系统默认浏览器（否则网页里的 `window.open` / `target="_blank"` 会被 WebView 静默丢掉，点「完整历史」没反应）。还启用了官方 `tauri-plugin-dialog`（只为给 composer 的「附加文件」开原生文件选择窗口，权限在 `capabilities/default.json` 的 `dialog:allow-open`） |
 | `scripts/package-desktop.mjs` | 打包脚本：组装运行时 → 裁剪 → `cargo tauri build` → 启动验证 |
 | `reference/README.md` | 参考副本的说明（副本本身被 `.gitignore` 排除） |
@@ -62,17 +62,17 @@
 | --- | --- | --- |
 | `components/SessionSidebar.tsx` | +285 / −250 | ① 会话/文件切成一个切换器（复用既有 `explorerOpen`，没加 state）② 新建会话满宽按钮 ③ 常驻搜索框（原来是点图标才展开）④ 项目分区标题 ⑤ 会话项的悬停按钮收进 ⋯ 菜单 ⑥ 标题超长才渐隐（`useOverflowingText` 实测 `scrollWidth`）⑦ 顶栏行（设置齿轮 + 收起侧栏） |
 | `components/TabBar.tsx` | +1 | 只加了一个 `className="file-tabs"`（铁律 2 里「加 className」那一半）。右栏文件标签条外面由 `components/FileTabStrip.tsx` 包一层，原生滚动条由 `native-theme.css` 的 `.file-tabs` 隐掉；上游那个 inline 的 `overflow-x: auto` **没动**，仍然是滚动视口本身 |
-| `components/AppShell.tsx` | +574 / −204 | ① 三柱布局与顶栏那一行 ② **顶栏左端是会话标签条**（取代上游的扩展状态行），见下 ③ ⋯ 菜单（复用上游 `renderChatToolbarActions`）④ 信息面板只在中间弹出（几何按中间列矩形算）+ 全宽展开时为红绿灯留位 ⑤ 脚本侧栏开关只在收起后出现 ⑥ 收起时让开红绿灯宽度 ⑦ 设置入口改为左栏齿轮 |
+| `components/AppShell.tsx` | +574 / −206 | ① 三柱布局与顶栏那一行 ② **顶栏左端是会话标签条**（取代上游的扩展状态行），见下 ③ ⋯ 菜单（复用上游 `renderChatToolbarActions`）④ 信息面板只在中间弹出（几何按中间列矩形算）+ 全宽展开时为红绿灯留位 ⑤ 脚本侧栏开关只在收起后出现 ⑥ 收起时让开红绿灯宽度 ⑦ 设置入口改为左栏齿轮 |
 | `components/ChatWindow.tsx` | +52 / −123 | ① 删掉空会话头部的品牌行（logo + Pi Web + 版本号）② 消息列表加 `.chat-scroll-area`（常显滚动条）③ 删掉地图的引用（`ChatMinimap` / `useMessageRefs` 整个拿掉，所以上游 #941 给进程分组新加的 `ref` 也一并去掉，只留它的 `key`）④ 扩展弹窗标题区：fork 当初改成「可收缩 + 40vh」，合并上游时发现 #961 修的是同一个 bug（百分比 max-height 在内容撑开的容器里按规范等于 `none`），已改用上游的 `flexShrink: 1 + 50vh`，fork 那份退休 ⑤ 内联 `phaseLabel` 随上游抽到 `lib/chat-phase-label.ts`（多了 `isCompacting` 参数） |
 | `components/ExtensionStatusBar.tsx` | +26 / −15 | 抽出 `ExtensionStatusLine` 单独导出（仍只有一份实现）。**fork 起初把它放在中栏顶栏，现在那里改成了会话标签条，所以 `ExtensionStatusLine` 在 app 里已不再被渲染** —— 组件与 `ChatWindow` 上报 `extensionStatuses` 的那条链都留着，要重新露出（例如收进 ⋯ 菜单）不必复现数据流。`ChatWindow` 里也不再渲染这条 `ExtensionStatusBar`（状态+widgets 那个架子），所以合并上游后**不要**把 `extensionWidgets` 解构进来（会变成永远不用的变量，eslint 报 warning）；上游的扩展 widgets 在 app 里目前无处显示 |
-| `components/ChatInput.tsx` | +160 / −20 | ① 控制条中间槽从空 spacer 变成真居中槽（`contextSlot`）② 去掉为地图留的 `paddingRight: 52` ③ **「附加图片」改成「附加文件」**：app 里回形针开**原生**文件选择窗口（真实路径），图片直接走原通道、其余一律只写 `@原路径`（不拷贝、不限大小）；浏览器里回落 `<input type=file>`，非图片先拷一份再 `@副本路径`。附件卡片、错误条、草稿里的 `files`、失败恢复都在这一个文件里（细节见第六节） |
+| `components/ChatInput.tsx` | +308 / −39 | ① 控制条中间槽从空 spacer 变成真居中槽（`contextSlot`）② 去掉为地图留的 `paddingRight: 52` ③ **「附加图片」改成「附加文件」**：app 里回形针开**原生**文件选择窗口（真实路径），图片直接走原通道、其余一律只写 `@原路径`（不拷贝、不限大小）；浏览器里回落 `<input type=file>`，非图片先拷一份再 `@副本路径`。附件卡片、错误条、草稿里的 `files`、失败恢复都在这一个文件里（细节见第六节） |
 | `components/BranchNavigator.tsx` | +10 / −2 | ① 图标配色跟「是否展开」而不是「是否有内容」② 下拉高度上限 `min(520px, 可视剩余空间)` |
 | `components/MessageView.tsx` | +6 / −0 | 只有 2 条 `SAFETY:` 注释（说明 `ImageContent` 与 pi-ai 旧扁平 shape 的兼容读法）。早先删掉的流式 token 统计已按需恢复，所以净改动只剩注释 |
-| `lib/draft-store.ts` | +25 / −6 | 草稿多一个可选的 `files`（非图片附件）。**为空时不写这个键** —— 上游测试会对整个草稿对象 `deepEqual`，多一个 `files: []` 就红了 |
-| `lib/i18n/messages/{zh-CN,en,zh-TW}.ts` | +33 / −2 | 新增 17 个 key（`sidebar.viewSessions` `viewFiles` `newSession` `projects` `moreActions`、`session.cacheHitShort`、`chat.ctxUsage`、3 个 `sessionTab.*`、2 个 `tabStrip.*` 两条标签条共用的滚动按钮文案、5 个 `chat.attach*` / `chat.attachment*` 附加文件文案）；删掉 2 个地图 key |
+| `lib/draft-store.ts` | +28 / −10 | 草稿多一个可选的 `files`（非图片附件）。**为空时不写这个键** —— 上游测试会对整个草稿对象 `deepEqual`，多一个 `files: []` 就红了 |
+| `lib/i18n/messages/{zh-CN,en,zh-TW}.ts` | +54 / −6 | 新增 17 个 key（`sidebar.viewSessions` `viewFiles` `newSession` `projects` `moreActions`、`session.cacheHitShort`、`chat.ctxUsage`、3 个 `sessionTab.*`、2 个 `tabStrip.*` 两条标签条共用的滚动按钮文案、5 个 `chat.attach*` / `chat.attachment*` 附加文件文案）；删掉 2 个地图 key |
 | `app/layout.tsx` | +3 | 引入 `native-theme.css` |
 | `.gitignore` / `eslint.config.mjs` / `AGENTS.md` | 小 | 忽略规则（含打包产物）、lint 忽略 `desktop/src-tauri/{runtime,target,gen,icons}`、文档 |
-| 11 个 `*.test.mjs` | +231 / −124 | 断言随 UI 结构更新（其中 `AppShell.workspace-memory.test.mjs` 占大头）；另有两个 fork 自己的测试文件 `lib/file-attachments.test.mjs`、`lib/attachment-staging.test.mjs` |
+| 13 个上游测试 + 4 个 fork 自己的 `*.test.mjs` | +884 / −192 | 断言随 UI 结构更新（其中 `AppShell.workspace-memory.test.mjs` 占大头）；4 个 fork 自己的：`lib/session-tabs`、`lib/file-attachments`、`lib/attachment-staging`、`lib/desktop-file-picker` |
 
 ## 四、删除
 
@@ -240,6 +240,36 @@ git merge --continue     # 完成这次合并（沿用自动生成的那条信�
 
 改完记得**再跑一次门禁**。冲突里最容易出事的不是报错，而是「语法没错但两边只留了一边」——
 测试一般能抓住，所以第 6 步不要跳。
+
+### 合并后怎么证明没丢东西（必做）
+
+冲突文件只占一小部分，真正的风险在**自动合并**的那些：两边都改过但位置不重叠，git 会静默
+取「只有一边改了」的那一边。合并完立刻跑这三条：
+
+```bash
+# 1. 合并结果的净改动，和上游这次的改动做差集。
+#    差集里只该有「我们自己新写的文档/注释」，出现任何代码文件都是被吃掉了。
+git diff --name-only HEAD | sort > /tmp/merged.txt
+git diff --name-only $(git merge-base HEAD upstream/main)..upstream/main | sort > /tmp/upstream.txt
+comm -23 /tmp/merged.txt /tmp/upstream.txt
+
+# 2. fork 独有文件必须一字未动
+git diff HEAD -- components/SessionTabBar.tsx components/FileTabStrip.tsx \
+  hooks/useTabStripDrag.ts hooks/useTabStripScroll.ts lib/session-tabs.ts lib/file-attachments.ts \
+  app/api/attachments/route.ts app/native-theme.css desktop/
+
+# 3. 两条铁律
+git diff upstream/main -- app/globals.css app/settings.css hooks/useAgentSession.ts   # 两处都必须为空
+```
+
+门禁里**上游的白盒测试是免费的 fork 检查**：它们断言的是上游的 JSX 结构，fork 改了结构后
+一旦某个 props 少传，测试会直接指出是哪个数字对不上。最近一次合并就是靠它发现 fork 自己那个
+独立的 `BranchNavigator` 漏传了 `locked`（上游新加的「运行中锁定分支切换」，fork 的桌面端下拉
+因此永远不会显示锁定提示）—— 已经补上。
+
+另一个坑：上游新解构出来的 state 如果落在 fork 已经删掉的那段 JSX 里，会变成「赋了值但没人用」，
+表现为 eslint 的 `no-unused-vars` warning（最近一次是 `extensionWidgets`）。**不要**为了消警告把
+上游那段 JSX 搬回来，按 fork 的取舍在第五节/第三节里注明即可。
 
 ### 不要做的事
 

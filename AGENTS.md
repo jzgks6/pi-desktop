@@ -206,6 +206,11 @@ Where the path comes from decides whether anything is copied:
   `dialog:allow-open`). Real paths, `kind: "link"`, **no copy and no size check at all**; images are
   read back through `POST /api/attachments/inspect` (magic-byte sniff, ≤10MB) and handed to the same
   image pipeline as before.
+  That capability needs **two** things the Tauri docs do not make obvious: the page is a *remote*
+  origin, so it must be listed under `remote.urls` (a capability is local-only by default), and
+  `remote.urls` is URLPattern where **the port is not wildcarded for you** — `http://127.0.0.1` does
+  not match `http://127.0.0.1:30145`, it has to be `http://127.0.0.1:*`. Get either wrong and every
+  invoke answers `Command plugin:dialog|open not allowed by ACL`.
 - **plain browser** — a page cannot learn a picked file's path, so non-images are copied to
   `~/.pi/attachments/<timestamp>-<name>` by `POST /api/attachments` and referenced as `@那副本`
   (`kind: "local"`, bounded by `MAX_LOCAL_FILE_BYTES` = 100MB).
@@ -292,7 +297,7 @@ Never fork through `AgentSession.fork()` / `AgentSessionRuntime.fork()`: they re
 `send("fork")` and `send("fork_branch")` instead open a separate `SessionManager` on the source file and `createBranchedSession()` from it, so the source's in-memory session is never mutated. That is why forking is allowed **while the source is running** (only a running `!` shell command refuses it): the copy needs only finished entries, and pi appends each one synchronously in this same process, so the file on disk already holds them. The in-flight assistant message lands at `message_end`, after the fork point. A source whose first user message has not landed has no file yet, and fork refuses it with the upstream "has not been saved yet" wording. After a fork, an idle source is shut down because the browser moves to the child; a running source is left alone and keeps its run, and the sidebar keeps showing it as running. `clone` still refuses a running session: it copies the current branch, which is the run in progress.
 
 ### In-session branching waits for the run
-pi's `navigateTree()` refuses while streaming or compacting, and that is structural: one file has one leaf pointer, a running agent appends every finished message under it, and navigating also swaps the agent's context. Moving the leaf mid-run would hang the rest of the turn off another branch. "Edit from here" is therefore hidden while the session is busy, and the BranchNavigator renders read-only (`locked`) with a note instead of switching; `handleLeafChange` refuses too, because switching only the view would render the live run under a different branch while the server leaf stayed put. To branch from a running session, fork it.
+pi's `navigateTree()` refuses while streaming or compacting, and that is structural: one file has one leaf pointer, a running agent appends every finished message under it, and navigating also swaps the agent's context. Moving the leaf mid-run would hang the rest of the turn off another branch. "Edit from here" is therefore hidden while the session is busy, and the BranchNavigator renders read-only (`locked`) with a note instead of switching; `handleLeafChange` refuses too, because switching only the view would render the live run under a different branch while the server leaf stayed put. To branch from a running session, fork it. The fork renders `BranchNavigator` in **two** places (its own desktop dropdown button next to `⋯`, and the mobile one); **both** must pass `locked={branchSwitchLocked}` — upstream's `useAgentSession.test.mjs` asserts exactly two occurrences in `AppShell.tsx`, and the desktop one was missing it until that test caught it.
 
 ### Two kinds of branching — don't confuse them
 - **Fork** ("New session" on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.
