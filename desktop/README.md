@@ -32,10 +32,14 @@ runtime/
 全局 pi（npm i -g @earendil-works/pi-coding-agent，可能在 fnm / nvm / homebrew … 下）
    │  启动时解析（一层层扫已知全局目录，再用 `/bin/zsh -lic 'npm root -g'` 兜底）
    ↓
-~/Library/Application Support/pi-desktop/pi-runtime/node_modules/@earendil-works/*
-   │  软链接（每次启动重建，所以升级 pi、换 node 版本都能跟上；放包外是因为改包会破坏签名）
-   ↓
-NODE_PATH 交给子进程 → 服务端 require 得到
+~/Library/Caches/pi-desktop/pi-runtime/node_modules/@earendil-works/*
+   │  链接场（每次启动重建，所以升级 pi、换 node 版本都能跟上）
+   │
+   ├─ 用 NODE_PATH 交给子进程（覆盖 CJS require）
+   └─ 在 app 自己的 node_modules 里放一条指向它的软链   ← 这一条不能省
+         · ESM import 不认 NODE_PATH；
+         · lib/pi-sdk-internals.ts 会从 app 目录向上找 package.json，
+           并要求 realpath 与 import 到的是同一个包（缺了就静默 MCP is off）
 ```
 
 找不到 pi 时弹原生对话框教你装哪个包（不退出 app，装完按 ⌘R 即可）。

@@ -93,8 +93,9 @@
    - `tauri.conf.json` 的 `productName`、`bundle.resources: ["runtime/"]` 仍在；
    - `main.rs` 里对 `runtime/app/...` 的路径假设仍成立；
    - `.on_new_window(...)` 仍在（没了的话，网页里的新窗口请求会被 WebView 静默丢弃）；
-   - `main.rs` 里 resolve_global_pi / link_pi_farm 对 **pi 包布局**的假设仍成立
-     （服务端 `serverExternalPackages` 会直接 require 四个包名，缺一个就起不来）；
+   - `main.rs` 里 resolve_global_pi / link_pi_farm / link_pi_into_app 对 **pi 包布局**
+     的假设仍成立（服务端 `serverExternalPackages` 直接加载四个包名，缺一个就起不来；
+     其中 `pi-ai` / `pi-agent-core` / `pi-tui` 在 `pi-coding-agent` 的嵌套 node_modules 里）；
    - 新菜单项 ⌘R 仍在、`on_menu_event` 里仍有它的分支。
 6. **跑门禁**：`npx tsc --noEmit` → 0、`npx eslint .` → 0、`npm test`（2325 项）。
    注意 macOS 上要先 `TMPDIR=/private/tmp/pi-test-tmp npm test`（原因见 AGENTS.md 的 Quick Start）。
@@ -171,23 +172,38 @@
 
 ### 方案 A：app 不自带 pi（用机器上全局那份）
 
+机制一共三步（少任何一步都会有人坏掉，都是踩过的）：
+
+1. **找**：扫 fnm / nvm / pnpm / bun / homebrew / usr-local 的全局 `node_modules`，
+   再用 `/bin/zsh -lic 'npm root -g'` 兜底（会跑用户的 `.zshrc`，必须给超时）；
+   多个命中取版本最高的。
+2. **链接场**：把全局 pi 链到 `~/Library/Caches/pi-desktop/pi-runtime/node_modules`
+   （每次启动重建，所以升级 pi、或 fnm 换了 node 版本都能跟上）。
+   要链**两处**：`@earendil-works` 作用域本身，以及 `pi-coding-agent` 自带的嵌套
+   `node_modules/@earendil-works/`（pi 1.0.0 起 `pi-ai` / `pi-agent-core` / `pi-tui`
+   在这里，而服务端会直接 require/import 它们）。
+3. **在 app 自己的 `node_modules` 里放软链** 指向链接场 —— **这一步不能省**，
+   见下面两条。
+
+- **光有 `NODE_PATH` 不够**：`NODE_PATH` 只对 CJS 的 `require` 生效，**对 ESM `import`
+  无效**，而 Next 的服务端产物是用 `import` 加载 `serverExternalPackages` 里这些包的。
+- **`lib/pi-sdk-internals.ts` 的自检也不认 NODE_PATH，更不认 ESM 解析钩子**：
+  它从 app 目录向上找 `node_modules/@earendil-works/pi-coding-agent/package.json`，
+  并要求找到的 `realpath` 与它 import 到的是同一个包。只有真实存在的软链能满足
+  （realpath 会把软链解开）。缺这一条的现象是**静默降级**：
+  `[pi-web] MCP is off: cannot locate @earendil-works/pi-coding-agent`。写包会让代码
+  签名失效，所以只记录、不阻断（写不了就只损失 MCP）。
+- **链接场路径里不能有空格**：它会进 `NODE_PATH`，而 `NODE_PATH` / `NODE_OPTIONS`
+  都按空白切分（`~/Library/Application Support/...` 就会被切成两半，故用 `Caches`）。
+- **验证打包产物必须在仓库外跑**（这条教训很贵）：在仓库里跑产物时，Node 解析
+  `@earendil-works/*` 会沿目录一路向上走到**仓库根**的 `node_modules` —— 那里正好有 pi，
+  于是看起来"通过"，装到 `/Applications` 就 500。正确姿势：先 `cp -R` 到 `/tmp` 或桌面，
+  再按外壳的做法建链接场 + 在 app 里放软链，然后起 `bin/pi-web.js` 验
+  `/`、`/api/sessions`、`/api/models`、`POST /api/agent/new` 四项。
 - **删 pi 必须在清悬空软链之前**：`node_modules/.bin/pi-ai` 这类软链指向
   `@earendil-works`，删晚了 Tauri 打包会以「资源不存在」直接失败。
-  `package-desktop.mjs` 里 `dropBundledPi()` 的位置就是这么定的。
-- **链接场要链两处**：作用域下直接有的，以及
-  `pi-coding-agent/node_modules/@earendil-works/` 里那批（pi 1.0.0 起
-  `pi-ai` / `pi-agent-core` / `pi-tui` 在这里，而服务端会直接 require 它们）。
-  只链作用域一层的话，服务起来时会报 `Cannot find module '@earendil-works/pi-ai'`。
-- **从 Finder 启动的 app 没有 fnm / nvm 的 PATH**：所以解析是一层层扫已知全局目录
-  （fnm / nvm / pnpm / bun / homebrew / usr-local），再用
-  `/bin/zsh -lic 'npm root -g'` 兜底；后者会跑用户的 `.zshrc`，必须给超时。
-- **不要往 app 包里写链接或文件**：改包内容会让代码签名失效。链接场放
-  `~/Library/Application Support/pi-desktop/pi-runtime`，每次启动重建 —— 顺带就
-  跟上了「pi 升级」和「fnm 换了 node 版本」。
-- **验证打包产物时，不要在用户的 app 正在跑的时候启动它**：
-  `reclaim_preferred_port()` 会把占着 30145 的、命令行里含 `pi-web` 的进程杀掉 ——
-  那正是用户正在用的服务。验证请走「手动复刻链接场 + `NODE_PATH` 起 runtime 里的
-  `bin/pi-web.js`」这条路（`/`、`/api/sessions`、`POST /api/agent/new` 三项即可）。
+- **别在用户的 app 正在跑的时候启动打包产物**：`reclaim_preferred_port()` 会把占着
+  30145 的、命令行里含 `pi-web` 的进程杀掉 —— 那正是用户正在用的服务。
 
 ## 七、上游更新后怎么操作（逐条命令）
 

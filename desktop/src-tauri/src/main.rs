@@ -513,6 +513,48 @@ fn resolve_global_pi() -> Option<(PathBuf, String)> {
     best.map(|(_, dir, version)| (dir, version))
 }
 
+/// 链接场的位置。
+///
+/// 放 `~/Library/Caches` 而不是 `~/Library/Application Support`：这个路径会出现在
+/// `NODE_PATH` 里，而 `NODE_PATH` 按空白切分 —— 带空格的路径会被切成两半。
+fn pi_farm_dir() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join("Library/Caches/pi-desktop/pi-runtime/node_modules"))
+}
+
+/// 在 app 自己的 `node_modules` 里放一个指向链接场的 `@earendil-works` 软链。
+///
+/// 为什么必须有它（试过只用 NODE_PATH，不够）：
+///   · 服务端用 **ESM `import`** 加载这几个包，而 `NODE_PATH` 只对 CJS 的 `require` 生效；
+///   · 更麻烦的是 `lib/pi-sdk-internals.ts` 的自检 —— 它**从 app 目录向上找**
+///     `node_modules/@earendil-works/pi-coding-agent/package.json`，并要求找到的
+///     `realpath` 跟它 import 到的是**同一个包**。这个遍历既不认 NODE_PATH，
+///     也不经过 ESM 解析钩子，只有真实存在的软链能满足（软链会被 realpath 解开）。
+///     少这一条，MCP 会以「MCP is off: cannot locate …」静默关闭。
+///
+/// 对包做修改会让代码签名失效，所以这里只在包**外**能写才写；写不了就只损失 MCP。
+fn link_pi_into_app(app_dir: &Path, farm: &Path) -> bool {
+    let target = app_dir.join("node_modules").join(PI_SCOPE);
+    let source = farm.join(PI_SCOPE);
+    if target.is_symlink() || target.is_file() {
+        let _ = std::fs::remove_file(&target);
+    } else if target.is_dir() {
+        let _ = std::fs::remove_dir_all(&target);
+    }
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::os::unix::fs::symlink(&source, &target) {
+        Ok(()) => true,
+        Err(err) => {
+            eprintln!(
+                "[pi-web-desktop] 没能在 app 里链接 pi（{err}）；MCP 会不可用，其它功能正常"
+            );
+            false
+        }
+    }
+}
+
 /// 把全局 pi 链到用户可写目录，返回这个「链接场」的 node_modules。
 ///
 /// 为什么不直接往 app 包里链接：改包内容会让代码签名失效。放这里还有个好处 ——
@@ -522,9 +564,7 @@ fn resolve_global_pi() -> Option<(PathBuf, String)> {
 /// 链接两处：作用域里直接有的；以及 `pi-coding-agent` 自带的嵌套依赖
 /// （pi 1.0.0 起 `pi-ai` / `pi-agent-core` / `pi-tui` 在这里，而服务端会直接 require 它们）。
 fn link_pi_farm(global_node_modules: &Path) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let farm = PathBuf::from(home)
-        .join("Library/Application Support/pi-desktop/pi-runtime/node_modules");
+    let farm = pi_farm_dir()?;
     let scope = farm.join(PI_SCOPE);
     let _ = std::fs::remove_dir_all(&scope);
     std::fs::create_dir_all(&scope).ok()?;
@@ -534,7 +574,12 @@ fn link_pi_farm(global_node_modules: &Path) -> Option<PathBuf> {
             return;
         };
         for entry in entries.flatten() {
-            let target = scope.join(entry.file_name());
+            let name = entry.file_name();
+            // 跳过 .DS_Store 这类点文件：链过去没用，还会误导排查
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let target = scope.join(&name);
             if target.exists() {
                 continue;
             }
@@ -611,6 +656,7 @@ fn start_server(app: &tauri::AppHandle, port: u16) -> Option<Child> {
         warn_missing_pi(app);
         return None;
     };
+    link_pi_into_app(&app_dir, &farm);
     eprintln!(
         "[pi-web-desktop] 使用全局 pi {version}（{}）",
         global_node_modules.display()

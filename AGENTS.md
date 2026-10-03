@@ -280,15 +280,24 @@ the node binary that gets bundled.
 **The app does not ship pi (fork, plan A).** `scripts/package-desktop.mjs` deletes
 `node_modules/@earendil-works` from the runtime — before `pruneDanglingLinks()`, otherwise
 `node_modules/.bin/pi-ai` makes the Tauri bundle step fail with "resource path doesn't
-exist". At launch `main.rs` finds the globally installed pi (scans fnm / nvm / pnpm / bun /
-homebrew / usr-local global `node_modules`, then falls back to `/bin/zsh -lic 'npm root -g'`
-with a timeout), symlinks it into
-`~/Library/Application Support/pi-desktop/pi-runtime/node_modules`, and passes `NODE_PATH`
-to the server — never into the bundle, which would invalidate the code signature. Two scopes
-get linked: `@earendil-works` itself, and the nested one inside `pi-coding-agent` (since pi
-1.0.0 that is where `pi-ai` / `pi-agent-core` / `pi-tui` live, and the server requires all
-four names through `serverExternalPackages`). A missing pi shows a native dialog instead of
-a blank window. ⌘R (查看 → 重启服务) re-resolves the global pi and restarts the server, so a
+exist". At launch `main.rs` (1) finds the globally installed pi (scans fnm / nvm / pnpm /
+bun / homebrew / usr-local global `node_modules`, then falls back to
+`/bin/zsh -lic 'npm root -g'` with a timeout), (2) symlinks it into the link farm at
+`~/Library/Caches/pi-desktop/pi-runtime` — no spaces in that path, because it reaches
+`NODE_PATH` — and (3) puts a symlink to the farm's `@earendil-works` inside the app's own
+`node_modules`. Step 3 is not optional: `NODE_PATH` only covers CJS `require`, while Next's
+server output `import`s these packages, and `lib/pi-sdk-internals.ts` separately walks up
+from the app directory for `@earendil-works/pi-coding-agent/package.json` and requires its
+`realpath` to equal the imported copy. Without step 3 the failure is silent:
+`[pi-web] MCP is off: cannot locate @earendil-works/pi-coding-agent`. A missing pi shows a
+native dialog instead of a blank window. ⌘R (查看 → 重启服务) re-resolves the global pi and
+restarts the server, so a pi or extension upgrade takes effect without quitting the app.
+
+⚠️ **Verify a packaged build from outside the repo.** Inside the repo, Node keeps walking up
+to the repo root's own `node_modules` (which has pi), so the build looks fine and then 500s
+once installed. Copy the `.app` to `/tmp` or the Desktop, make the link farm plus the in-app
+symlink the way the shell does, and check `/`, `/api/sessions`, `/api/models` and
+`POST /api/agent/new`.
 pi or extension upgrade takes effect without quitting the app.
 
 ⚠️ Never launch the packaged app (or its binary) while the user's own app is running:
