@@ -2,11 +2,11 @@
 
 上游：`https://github.com/agegr/pi-web`，本 fork 的基线是 **`96966e5`**。
 下面这份清单的规模用这条命令量（`upstream/main` 已经并进来了，所以量到的就是 fork 自己那部分）：
-`git diff --stat upstream/main HEAD` → **65 个文件**（+12057 / −1900）。
+`git diff --stat upstream/main HEAD` → **65 个文件**（+12247 / −1906）。
 
-> **当前状态**：本 fork 的 `main` 压在上游 `d733d43` 之上 —— 比基线 `96966e5` 多 62 个上游提交
-> （`fd037e4` / `6a1246e` / `433d09e`，加上后来 merge 进来的 9 个与 50 个，均已完整保留），
-> fork 自己 12 个提交 + 2 个 merge commit 叠在它们上面。
+> **当前状态**：本 fork 的 `main` 压在上游 **`6fcd7d4`（Release v0.10.0）** 之上 —— 比基线 `96966e5` 多 109 个上游提交
+> （已全部保留），fork 自己 14 个提交 + 3 个 merge commit 叠在它们上面。
+> 前端是 pi-web 0.10.0，pi 四个包（`pi-coding-agent` / `pi-ai` / `pi-agent-core` / `pi-tui`）是 **1.0.0**。
 > 上游再更新时，按第五节把这里的改动重新叠一次。
 
 改动性质：把界面改成 IDE 式三栏 + 顶栏会话标签条、加一个 macOS 桌面外壳。**没有动任何业务逻辑**
@@ -50,7 +50,7 @@
 | `design-prototypes/sessions-sidebar.html` | 左栏的设计稿（仅存档，无代码作用） |
 | `app/api/attachments/route.ts` | `POST /api/attachments`：把**浏览器里**挑的非图片文件暂存到 `~/.pi/attachments/`，只回传绝对路径（原始字节不进模型上下文）。放在 `~/.pi/` 而不是会话工作区，否则会污染项目目录与 git 状态。app 里用不到（原生对话框直接给真实路径） |
 | `app/api/attachments/inspect/route.ts` | `POST /api/attachments/inspect`：按**路径**识别桌面对话框选中的文件 —— 图片（看魔数，≤10MB）带回 base64 走图片通道，其余只回元数据 |
-| `desktop/`（8 个文件） | macOS 外壳：Tauri 工程 + 启动页 + 说明，详见 `desktop/README.md`。`src/main.rs` 里还建了一份应用菜单，注册三个原生快捷键：**⌘T** 新建空白会话标签、**⌘W** 关闭当前标签、**⌘,** 打开设置。三者都只把命令 `eval` 成 CustomEvent 交给网页（见 `hooks/useDesktopMenuCommands.ts`）。菜单里**不能**再放「关闭窗口」（默认菜单那个 ⌘W 必须拿掉，否则两个 ⌘W 打架；现在 ⌘W 完全不碰窗口）；编辑菜单必须留着，否则输入框里的 ⌘C/⌘V/⌘A 会失效」。另外 `main.rs` 注册了 `on_new_window`，把指向自己服务的新窗口请求交给系统默认浏览器（否则网页里的 `window.open` / `target="_blank"` 会被 WebView 静默丢掉，点「完整历史」没反应）。还启用了官方 `tauri-plugin-dialog`（只为给 composer 的「附加文件」开原生文件选择窗口，权限在 `capabilities/default.json` 的 `dialog:allow-open`） |
+| `desktop/`（8 个文件） | macOS 外壳：Tauri 工程 + 启动页 + 说明，详见 `desktop/README.md`。**app 不自带 pi**（方案 A）：外壳启动时去机器上找全局安装的那份 pi，链接到 `~/Library/Application Support/pi-desktop/pi-runtime`，再用 `NODE_PATH` 交给 Node；找不到就弹原生对话框告诉你装哪个包。`src/main.rs` 里还建了一份应用菜单，注册四个原生快捷键：**⌘T** 新建空白会话标签、**⌘W** 关闭当前标签、**⌘,** 打开设置、**⌘R** 重启服务（前三个只把命令 `eval` 成 CustomEvent 交给网页，见 `hooks/useDesktopMenuCommands.ts`；⌘R 在外壳这边重起 Node 服务，用来让刚升级的 pi / 扩展生效，不必退出 app）。菜单里**不能**再放「关闭窗口」（默认菜单那个 ⌘W 必须拿掉，否则两个 ⌘W 打架；现在 ⌘W 完全不碰窗口）；编辑菜单必须留着，否则输入框里的 ⌘C/⌘V/⌘A 会失效」。另外 `main.rs` 注册了 `on_new_window`，把指向自己服务的新窗口请求交给系统默认浏览器（否则网页里的 `window.open` / `target="_blank"` 会被 WebView 静默丢掉，点「完整历史」没反应）。还启用了官方 `tauri-plugin-dialog`（给 composer 的「附加文件」开原生文件选择窗口，并弹「缺少 pi」对话框；网页侧权限在 `capabilities/default.json` 的 `dialog:allow-open`，Rust 侧调用不走权限） |
 | `scripts/package-desktop.mjs` | 打包脚本：组装运行时 → 裁剪 → `cargo tauri build` → 启动验证 |
 | `reference/README.md` | 参考副本的说明（副本本身被 `.gitignore` 排除） |
 
@@ -88,12 +88,15 @@
 2. 先拷**第二节的新增文件** —— 它们不依赖上游内部结构，冲突风险最低。
 3. 再按**第三节**逐文件改，每个文件只动那一行说明里的几处；改完对照该行自查。
 4. 处理**第四节**的删除，并清掉全部残留引用。
-5. `desktop/` + `scripts/` 一般不用动，只确认四件事：
+5. `desktop/` + `scripts/` 一般不用动，只确认六件事：
    - `bin/pi-web.js` 的 CLI（`-p` / `--no-open`）与 `.next` 的目录约定没变；
    - `tauri.conf.json` 的 `productName`、`bundle.resources: ["runtime/"]` 仍在；
    - `main.rs` 里对 `runtime/app/...` 的路径假设仍成立；
-   - `.on_new_window(...)` 仍在（没了的话，网页里的新窗口请求会被 WebView 静默丢弃）。
-6. **跑门禁**：`npx tsc --noEmit` → 0、`npx eslint .` → 0、`npm test`（1393 项）。
+   - `.on_new_window(...)` 仍在（没了的话，网页里的新窗口请求会被 WebView 静默丢弃）；
+   - `main.rs` 里 resolve_global_pi / link_pi_farm 对 **pi 包布局**的假设仍成立
+     （服务端 `serverExternalPackages` 会直接 require 四个包名，缺一个就起不来）；
+   - 新菜单项 ⌘R 仍在、`on_menu_event` 里仍有它的分支。
+6. **跑门禁**：`npx tsc --noEmit` → 0、`npx eslint .` → 0、`npm test`（2325 项）。
    注意 macOS 上要先 `TMPDIR=/private/tmp/pi-test-tmp npm test`（原因见 AGENTS.md 的 Quick Start）。
    界面上还有几条要人眼看的：红绿灯位置、左栏观感、滚动条。
 
@@ -165,6 +168,26 @@
   方便辨认和手动删），没做定期删除 —— 删用户文件这种事不能默默干。
 
 ---
+
+### 方案 A：app 不自带 pi（用机器上全局那份）
+
+- **删 pi 必须在清悬空软链之前**：`node_modules/.bin/pi-ai` 这类软链指向
+  `@earendil-works`，删晚了 Tauri 打包会以「资源不存在」直接失败。
+  `package-desktop.mjs` 里 `dropBundledPi()` 的位置就是这么定的。
+- **链接场要链两处**：作用域下直接有的，以及
+  `pi-coding-agent/node_modules/@earendil-works/` 里那批（pi 1.0.0 起
+  `pi-ai` / `pi-agent-core` / `pi-tui` 在这里，而服务端会直接 require 它们）。
+  只链作用域一层的话，服务起来时会报 `Cannot find module '@earendil-works/pi-ai'`。
+- **从 Finder 启动的 app 没有 fnm / nvm 的 PATH**：所以解析是一层层扫已知全局目录
+  （fnm / nvm / pnpm / bun / homebrew / usr-local），再用
+  `/bin/zsh -lic 'npm root -g'` 兜底；后者会跑用户的 `.zshrc`，必须给超时。
+- **不要往 app 包里写链接或文件**：改包内容会让代码签名失效。链接场放
+  `~/Library/Application Support/pi-desktop/pi-runtime`，每次启动重建 —— 顺带就
+  跟上了「pi 升级」和「fnm 换了 node 版本」。
+- **验证打包产物时，不要在用户的 app 正在跑的时候启动它**：
+  `reclaim_preferred_port()` 会把占着 30145 的、命令行里含 `pi-web` 的进程杀掉 ——
+  那正是用户正在用的服务。验证请走「手动复刻链接场 + `NODE_PATH` 起 runtime 里的
+  `bin/pi-web.js`」这条路（`/`、`/api/sessions`、`POST /api/agent/new` 三项即可）。
 
 ## 七、上游更新后怎么操作（逐条命令）
 

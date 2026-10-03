@@ -263,7 +263,7 @@ desktop/
     src/main.rs              shell: pick port → spawn node → navigate → clean up
     tauri.conf.json          productName "pi desktop"; bundle.resources = runtime/
     Cargo.toml               tauri only (no shell plugin — std::process is enough)
-    runtime/                 assembled at package time (gitignored, ~670M)
+    runtime/                 assembled at package time (gitignored, ~516M; **no pi inside**)
     target/ gen/ icons/      cargo output / generated (gitignored)
 scripts/package-desktop.mjs  assemble runtime/ then run `cargo tauri build`
 ```
@@ -276,6 +276,25 @@ node scripts/package-desktop.mjs --skip-build   # reuse the existing .next
 Flags: `--skip-build`, `--reuse-runtime`, `--assemble-only`, `--skip-tauri`, `--verify`,
 `--bundles=<app|dmg>`, `--force-icons`, `--debug`, plus `PI_DESKTOP_NODE=<path>` to pick
 the node binary that gets bundled.
+
+**The app does not ship pi (fork, plan A).** `scripts/package-desktop.mjs` deletes
+`node_modules/@earendil-works` from the runtime — before `pruneDanglingLinks()`, otherwise
+`node_modules/.bin/pi-ai` makes the Tauri bundle step fail with "resource path doesn't
+exist". At launch `main.rs` finds the globally installed pi (scans fnm / nvm / pnpm / bun /
+homebrew / usr-local global `node_modules`, then falls back to `/bin/zsh -lic 'npm root -g'`
+with a timeout), symlinks it into
+`~/Library/Application Support/pi-desktop/pi-runtime/node_modules`, and passes `NODE_PATH`
+to the server — never into the bundle, which would invalidate the code signature. Two scopes
+get linked: `@earendil-works` itself, and the nested one inside `pi-coding-agent` (since pi
+1.0.0 that is where `pi-ai` / `pi-agent-core` / `pi-tui` live, and the server requires all
+four names through `serverExternalPackages`). A missing pi shows a native dialog instead of
+a blank window. ⌘R (查看 → 重启服务) re-resolves the global pi and restarts the server, so a
+pi or extension upgrade takes effect without quitting the app.
+
+⚠️ Never launch the packaged app (or its binary) while the user's own app is running:
+`reclaim_preferred_port()` kills whatever holds port 30145 with `pi-web` in its command line
+— that is their live server. Verify a build by starting the runtime's `bin/pi-web.js` by hand
+with a hand-made link farm plus `NODE_PATH` instead.
 
 Four guards, each added after a real failure:
 

@@ -26,17 +26,37 @@ runtime/
   app/public/
 ```
 
-`main.rs` 依次：修可执行位 → 选端口（首选 30145，被上一次残留的 pi-web 占着就接管它）
-→ 拉起 `node bin/pi-web.js -p <port> --no-open` → 先把启动页显示出来 → 等服务开始监听
-→ 把窗口导航过去。关窗口只是隐藏（macOS 习惯），⌘Q 或程序坞「退出」才收掉服务。
+**注意：运行时里没有 pi**。方案 A 之后 app 不自带 pi，它用机器上全局安装的那份：
+
+```text
+全局 pi（npm i -g @earendil-works/pi-coding-agent，可能在 fnm / nvm / homebrew … 下）
+   │  启动时解析（一层层扫已知全局目录，再用 `/bin/zsh -lic 'npm root -g'` 兜底）
+   ↓
+~/Library/Application Support/pi-desktop/pi-runtime/node_modules/@earendil-works/*
+   │  软链接（每次启动重建，所以升级 pi、换 node 版本都能跟上；放包外是因为改包会破坏签名）
+   ↓
+NODE_PATH 交给子进程 → 服务端 require 得到
+```
+
+找不到 pi 时弹原生对话框教你装哪个包（不退出 app，装完按 ⌘R 即可）。
+
+`main.rs` 依次：修可执行位 → 解析全局 pi 并搭好链接场 → 选端口（首选 30145，被上一次
+残留的 pi-web 占着就接管它）→ 拉起 `node bin/pi-web.js -p <port> --no-open` → 先把启动页
+显示出来 → 等服务开始监听 → 把窗口导航过去。关窗口只是隐藏（macOS 习惯），⌘Q 或
+程序坞「退出」才收掉服务。
 
 ### 原生菜单与快捷键
 
-macOS 把 ⌘T / ⌘W / ⌘, 这类组合先交给**应用菜单**，网页根本收不到 keydown，所以它们在
-`main.rs` 的 `build_menu` 里注册（整份菜单是自建的，Tauri 默认那份被换掉了）。三个菜单项都
-只把命令 `eval` 成 CustomEvent 丢给聚焦窗口（`pi-desktop:new-tab` / `close-tab` / `settings`），
+macOS 把 ⌘T / ⌘W / ⌘, / ⌘R 这类组合先交给**应用菜单**，网页根本收不到 keydown，所以它们在
+`main.rs` 的 `build_menu` 里注册（整份菜单是自建的，Tauri 默认那份被换掉了）。前三个菜单项只把
+命令 `eval` 成 CustomEvent 丢给聚焦窗口（`pi-desktop:new-tab` / `close-tab` / `settings`），
 由 `hooks/useDesktopMenuCommands.ts` 接上网页已有的 handler —— 桌面壳与网页之间只有这三个
 事件名字符串的约定，网页侧不引 `@tauri-apps/api`（浏览器里是纯 no-op）。
+
+**⌘R（查看 → 重启服务）不一样，它在外壳这边做**：停掉 Node 服务（SIGTERM，让 pi-web.js
+转发给 next）→ 等端口放开 → **重新解析全局 pi**（升级 pi 或换 node 版本后链接场会跟着重建）
+→ 重起 → 把窗口导航过去。它就是「热重启」：用全局 pi 之后 app 和 pi 版本分开了，升级完
+pi / 扩展不必退出 app，按一下 ⌘R 就行。
 
 两条不能忘的约束：
 
