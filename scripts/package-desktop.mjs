@@ -129,6 +129,28 @@ function prodTopLevelNames() {
   return names;
 }
 
+/**
+ * 方案 A：app 不自带 pi。
+ *
+ * 运行时里不留 `@earendil-works`，Rust 壳启动时去机器上找全局安装的那份 pi
+ * （链接到 ~/Library/Application Support/pi-desktop/pi-runtime，再用 NODE_PATH 指过去）。
+ * 这么做的两个目的：
+ *   · 机器上只有一份 pi，不再有「包里 0.99.1 / 全局 1.0.0」这种版本分歧；
+ *   · 升级 pi 只需 `npm i -g`，app 里按 ⌘R 重起服务即可，不用重新打包。
+ *
+ * 代价（写在 FORK.md 里）：换一台机器必须先装 Node + 全局 pi，不再「拷过去就能点开」。
+ */
+function dropBundledPi() {
+  const scope = join(APP_DIR, "node_modules", "@earendil-works");
+  if (!existsSync(scope)) {
+    log("运行时里没有 @earendil-works（本次构建本就不带 pi）");
+    return;
+  }
+  const size = dirSize(scope);
+  rmSync(scope, { recursive: true, force: true });
+  log(`运行时已移除自带 pi：@earendil-works（${mb(size)}）→ 启动时用全局安装的那份`);
+}
+
 /** 把运行时里的 node_modules 裁到生产闭包（顶层维度）。 */
 function pruneToProdDeps() {
   const nm = join(APP_DIR, "node_modules");
@@ -367,6 +389,9 @@ function stepAssemble() {
   step("裁剪 node_modules");
   pruneForeignBinaries();
   pruneToProdDeps();
+  // 先删自带的 pi 再清悬空软链 —— node_modules/.bin 里 pi / pi-ai 这些软链
+  // 指向 @earendil-works，删晚了 Tauri 打包会因为「资源不存在」直接失败。
+  dropBundledPi();
   pruneDanglingLinks();
 
   // node-pty 的 spawn-helper 在部分版本里不带可执行位（上游 prepare-terminal.js

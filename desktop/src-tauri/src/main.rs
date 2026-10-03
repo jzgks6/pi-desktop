@@ -1,18 +1,20 @@
 // pi desktop 外壳
 //
-// 只负责五件事，业务逻辑一行都不碰（那些都在被拉起的 Node 服务里）：
+// 只负责六件事，业务逻辑一行都不碰（那些都在被拉起的 Node 服务里）：
 //   1. 从 app 包里找到内置的 node 与 pi-web 运行时
-//   2. 拉起 `node bin/pi-web.js -p <port> --no-open`
-//   3. 先显示启动页，等服务开始监听端口后把窗口导航过去
-//   4. 原生菜单：⌘T 新建标签页 / ⌘W 关闭标签页 / ⌘, 设置
-//      （这三个只是把命令 eval 给网页，真正的行为在网页里；⌘W 与窗口无关，
-//      窗口只能缢红灯或 ⌘Q 退出去）
-//   5. 退出时把服务收干净
+//   2. 用机器上**全局安装的 pi**（app 不再自带 pi，见 FORK.md 的方案 A），
+//      把它链到用户可写目录并通过 NODE_PATH 交给 Node
+//   3. 拉起 `node bin/pi-web.js -p <port> --no-open`
+//   4. 先显示启动页，等服务开始监听端口后把窗口导航过去
+//   5. 原生菜单：⌘T 新建标签页 / ⌘W 关闭标签页 / ⌘, 设置 / ⌘R 重启服务
+//      （前三个把命令 eval 给网页，真正的行为在网页里；⌘R 在外壳这边重起 Node 服务，
+//      用来让「刚升级的 pi / 扩展」生效，不必退出 app）
+//      另外 ⌘W 与窗口无关，窗口只能缢红灯或 ⌘Q 退出去
+//   6. 退出时把服务收干净
 //
 // 之所以要一个 Rust 壳而不是直接用浏览器：pi-web 需要一个真实的 Node 进程
 // 来跑 next、node-pty、以及 pi 的 agent 循环。
 
-use std::fs::File;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -34,6 +36,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(400);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
+/// 方案 A：app 不自带 pi，用机器上全局安装的那份。
+const PI_PACKAGE: &str = "pi-coding-agent";
+const PI_SCOPE: &str = "@earendil-works";
+/// 服务端（`serverExternalPackages`）会直接 require 这四个名字，缺一个就起不来。
+const PI_REQUIRED: [&str; 4] = ["pi-coding-agent", "pi-ai", "pi-agent-core", "pi-tui"];
+/// 让登录 shell 回答 `npm root -g` 的上限（fnm/nvm 的 PATH 只存在于交互 shell 里）。
+const NPM_ROOT_TIMEOUT: Duration = Duration::from_secs(8);
+
 /* ------------------------------------------------------------------ *
  * 原生菜单：⌘T / ⌘W / ⌘,
  * ------------------------------------------------------------------ */
@@ -42,6 +52,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 const MENU_NEW_TAB: &str = "pi-new-tab";
 const MENU_CLOSE_TAB: &str = "pi-close-tab";
 const MENU_SETTINGS: &str = "pi-settings";
+const MENU_RESTART_SERVER: &str = "pi-restart-server";
 
 /// 传给网页侧的 CustomEvent 名。**必须与 `hooks/useDesktopMenuCommands.ts` 里的
 /// `DESKTOP_MENU_EVENTS` 一致**，改了要两边一起改。
@@ -196,6 +207,10 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .item(&PredefinedMenuItem::quit(app, Some("退出 pi desktop"))?)
         .build()?;
 
+    let restart = MenuItemBuilder::with_id(MENU_RESTART_SERVER, "重启服务")
+        .accelerator("CmdOrCtrl+R")
+        .build(app)?;
+
     let file_menu = SubmenuBuilder::new(app, "文件")
         .item(&new_tab)
         .item(&close_tab)
@@ -215,6 +230,10 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         ])
         .build()?;
 
+    let view_menu = SubmenuBuilder::new(app, "查看")
+        .item(&restart)
+        .build()?;
+
     let window_menu = SubmenuBuilder::new(app, "窗口")
         .items(&[
             &PredefinedMenuItem::minimize(app, Some("最小化"))?,
@@ -223,7 +242,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .build()?;
 
     MenuBuilder::new(app)
-        .items(&[&app_menu, &file_menu, &edit_menu, &window_menu])
+        .items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
         .build()
 }
 
@@ -396,6 +415,274 @@ fn stop_server(app: &tauri::AppHandle) {
     let _ = child.kill();
 }
 
+/* ------------------------------------------------------------------ *
+ * 方案 A：用机器上全局安装的 pi（app 不再自带 pi）
+ * ------------------------------------------------------------------ */
+
+/// 读一个包的版本号（只认顶层 `"version": "x.y.z"`，不引 JSON 依赖）。
+fn package_version(package_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(package_dir.join("package.json")).ok()?;
+    let rest = text.split("\"version\":").nth(1)?.trim_start();
+    let value = rest.strip_prefix('"')?.split('"').next()?;
+    Some(value.to_string())
+}
+
+/// 版本比较用：`1.0.0-beta.2` → [1, 0, 0, 2]。
+fn version_key(version: &str) -> Vec<u64> {
+    version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+/// 某个 node_modules 目录里有没有 pi。
+fn pi_version_in(node_modules: &Path) -> Option<String> {
+    package_version(&node_modules.join(PI_SCOPE).join(PI_PACKAGE))
+}
+
+/// 把 `base` 下面每个子目录拼上 `suffix` 收进来 —— fnm / nvm 是「一个 node 版本一个目录」。
+fn push_version_dirs(base: &Path, suffix: &str, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            out.push(entry.path().join(suffix));
+        }
+    }
+}
+
+/// 各种 node 安装器的全局 node_modules 目录（先扫这些，不跑 shell，快）。
+fn scanned_global_roots() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let home = PathBuf::from(home);
+        for base in [
+            home.join(".local/share/fnm/node-versions"),
+            home.join("Library/Application Support/fnm/node-versions"),
+        ] {
+            push_version_dirs(&base, "installation/lib/node_modules", &mut out);
+        }
+        push_version_dirs(&home.join(".nvm/versions/node"), "lib/node_modules", &mut out);
+        push_version_dirs(&home.join("Library/pnpm/global"), "node_modules", &mut out);
+        push_version_dirs(&home.join(".local/share/pnpm/global"), "node_modules", &mut out);
+        out.push(home.join(".bun/install/global/node_modules"));
+        out.push(home.join(".npm-global/lib/node_modules"));
+    }
+    out.push(PathBuf::from("/opt/homebrew/lib/node_modules"));
+    out.push(PathBuf::from("/usr/local/lib/node_modules"));
+    out
+}
+
+/// 兜底：问一次登录 shell 的 `npm root -g`。fnm / nvm 的 PATH 只存在于交互 shell 里，
+/// 而这个 app 是从 Finder 起来的，环境里没有它们。会跑用户的 .zshrc，所以给个上限。
+fn npm_root_from_login_shell() -> Option<PathBuf> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let output = Command::new("/bin/zsh").args(["-lic", "npm root -g"]).output();
+        let _ = tx.send(output.ok().map(|out| {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }));
+    });
+    let line = rx.recv_timeout(NPM_ROOT_TIMEOUT).ok().flatten()?;
+    let path = PathBuf::from(line);
+    if path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// 找到全局 pi 所在的 node_modules 目录，有多个就取版本最高的那个。
+fn resolve_global_pi() -> Option<(PathBuf, String)> {
+    let mut candidates = scanned_global_roots();
+    if let Some(from_shell) = npm_root_from_login_shell() {
+        candidates.push(from_shell);
+    }
+    let mut best: Option<(Vec<u64>, PathBuf, String)> = None;
+    for dir in candidates {
+        let Some(version) = pi_version_in(&dir) else {
+            continue;
+        };
+        let key = version_key(&version);
+        if best.as_ref().map_or(true, |(best_key, _, _)| key > *best_key) {
+            best = Some((key, dir, version));
+        }
+    }
+    best.map(|(_, dir, version)| (dir, version))
+}
+
+/// 把全局 pi 链到用户可写目录，返回这个「链接场」的 node_modules。
+///
+/// 为什么不直接往 app 包里链接：改包内容会让代码签名失效。放这里还有个好处 ——
+/// 每次启动重建，所以 pi 升级、或者用 fnm 换了 node 版本（全局包目录跟着换）
+/// 都能自己跟上。
+///
+/// 链接两处：作用域里直接有的；以及 `pi-coding-agent` 自带的嵌套依赖
+/// （pi 1.0.0 起 `pi-ai` / `pi-agent-core` / `pi-tui` 在这里，而服务端会直接 require 它们）。
+fn link_pi_farm(global_node_modules: &Path) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let farm = PathBuf::from(home)
+        .join("Library/Application Support/pi-desktop/pi-runtime/node_modules");
+    let scope = farm.join(PI_SCOPE);
+    let _ = std::fs::remove_dir_all(&scope);
+    std::fs::create_dir_all(&scope).ok()?;
+
+    let link_dir = |dir: PathBuf| {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let target = scope.join(entry.file_name());
+            if target.exists() {
+                continue;
+            }
+            let _ = std::os::unix::fs::symlink(entry.path(), &target);
+        }
+    };
+    link_dir(global_node_modules.join(PI_SCOPE));
+    link_dir(
+        global_node_modules
+            .join(PI_SCOPE)
+            .join(PI_PACKAGE)
+            .join("node_modules")
+            .join(PI_SCOPE),
+    );
+
+    for name in PI_REQUIRED {
+        if !scope.join(name).exists() {
+            eprintln!("[pi-web-desktop] 全局 pi 里找不到 {PI_SCOPE}/{name}");
+            return None;
+        }
+    }
+    Some(farm)
+}
+
+/// 告诉 Node 去哪找 pi：链接场 + 全局目录（后者是保险，链接场本身就够）。
+fn pi_node_path(farm: &Path, global_node_modules: &Path) -> std::ffi::OsString {
+    std::env::join_paths([farm.join("node_modules"), global_node_modules.to_path_buf()])
+        .unwrap_or_else(|_| farm.join("node_modules").into_os_string())
+}
+
+/// 找不到 pi 时说清楚怎么办（原生对话框；Rust 侧直接调，不经过网页权限）。
+fn warn_missing_pi(app: &tauri::AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    app.dialog()
+        .message(
+            "找不到全局安装的 pi。\n\n             这个 app 不自带 pi，它用机器上的那一份。\n\n             先装好（任选其一）：\n             npm install -g @earendil-works/pi-coding-agent\n             pnpm add -g @earendil-works/pi-coding-agent\n\n             装好后按 ⌘R 重启服务，不用退出 app。",
+        )
+        .title("pi desktop：缺少 pi")
+        .kind(MessageDialogKind::Error)
+        .show(|_| {});
+}
+
+/// 拉起 Node 服务（首次启动与 ⌘R 热重启共用）。返回子进程句柄。
+fn start_server(app: &tauri::AppHandle, port: u16) -> Option<Child> {
+    let runtime = app.path().resource_dir().ok()?.join("runtime");
+    let app_dir = runtime.join("app");
+    let node = runtime.join("bin").join("node");
+    let entry = app_dir.join("bin").join("pi-web.js");
+
+    if !entry.exists() {
+        eprintln!(
+            "[pi-web-desktop] 找不到运行时入口: {}（app 包可能不完整）",
+            entry.display()
+        );
+        return None;
+    }
+
+    ensure_executable(&node);
+    for rel in [
+        "node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper",
+        "node_modules/node-pty/prebuilds/darwin-x64/spawn-helper",
+        "node_modules/node-pty/build/Release/spawn-helper",
+    ] {
+        ensure_executable(&app_dir.join(rel));
+    }
+
+    // 方案 A：pi 不在包里，去机器上找。
+    let Some((global_node_modules, version)) = resolve_global_pi() else {
+        eprintln!("[pi-web-desktop] 机器上找不到全局安装的 pi");
+        warn_missing_pi(app);
+        return None;
+    };
+    let Some(farm) = link_pi_farm(&global_node_modules) else {
+        warn_missing_pi(app);
+        return None;
+    };
+    eprintln!(
+        "[pi-web-desktop] 使用全局 pi {version}（{}）",
+        global_node_modules.display()
+    );
+
+    // 服务端日志留在 ~/Library/Logs/<bundle id>/server.log（追加写，重起历史都留着）
+    let log_path = app.path().app_log_dir().ok().map(|dir| {
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("server.log")
+    });
+
+    let mut cmd = Command::new(&node);
+    cmd.arg(&entry)
+        .arg("-p")
+        .arg(port.to_string())
+        .arg("--no-open")
+        .current_dir(&app_dir)
+        .env("PI_WEB_NO_OPEN", "1")
+        .env("PI_WEB_SKIP_VERSION_CHECK", "1")
+        .env("PATH", child_path(&runtime))
+        .env("NODE_PATH", pi_node_path(&farm, &global_node_modules))
+        .stdin(Stdio::null());
+
+    let log = log_path.and_then(|path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+    });
+    match log {
+        Some(file) => match file.try_clone() {
+            Ok(clone) => cmd.stdout(Stdio::from(file)).stderr(Stdio::from(clone)),
+            Err(_) => cmd.stdout(Stdio::from(file)).stderr(Stdio::null()),
+        },
+        None => cmd.stdout(Stdio::null()).stderr(Stdio::null()),
+    };
+
+    match cmd.spawn() {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            eprintln!("[pi-web-desktop] 拉起服务失败: {err}");
+            None
+        }
+    }
+}
+
+/// ⌘R：只重起 Node 服务（顺带重新解析全局 pi），然后把窗口导航到新服务。
+/// 用处：刚 `npm i -g` 升级了 pi 或扩展，不必退出 app。
+fn restart_server(app: &tauri::AppHandle) {
+    stop_server(app);
+    // next 的子进程可能比父进程晚一点才放开端口
+    for _ in 0..40 {
+        if port_is_free(PREFERRED_PORT) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let port = pick_port();
+    let Some(child) = start_server(app, port) else {
+        return;
+    };
+    if let Some(state) = app.try_state::<ServerProcess>() {
+        if let Ok(mut guard) = state.0.lock() {
+            *guard = Some(child);
+        }
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        spawn_navigate_when_ready(window, port);
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         // 只为了给 composer 的「附加文件」开一个**原生**文件选择窗口（拿真实路径，
@@ -410,71 +697,21 @@ fn main() {
             MENU_NEW_TAB => dispatch_to_focused_window(app, MENU_EVENT_NEW_TAB),
             MENU_CLOSE_TAB => dispatch_to_focused_window(app, MENU_EVENT_CLOSE_TAB),
             MENU_SETTINGS => dispatch_to_focused_window(app, MENU_EVENT_SETTINGS),
+            // ⌘R 在外壳这边做（不是派发给网页）：重起 Node 服务并重新解析全局 pi。
+            // 放后台线程，菜单事件处理函数要立刻返回。
+            MENU_RESTART_SERVER => {
+                let app = app.clone();
+                std::thread::spawn(move || restart_server(&app));
+            }
             _ => {}
         })
         .setup(|app| {
-            let resource_dir = app.path().resource_dir()?;
-            let runtime = resource_dir.join("runtime");
-            let node = runtime.join("bin").join("node");
-            let app_dir = runtime.join("app");
-            let entry = app_dir.join("bin").join("pi-web.js");
-
-            ensure_executable(&node);
-            for rel in [
-                "node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper",
-                "node_modules/node-pty/prebuilds/darwin-x64/spawn-helper",
-                "node_modules/node-pty/build/Release/spawn-helper",
-            ] {
-                ensure_executable(&app_dir.join(rel));
-            }
-
-            // 服务端日志留在 ~/Library/Logs/<bundle id>/server.log，起不来时有据可查
-            let log_path = match app.path().app_log_dir() {
-                Ok(dir) => {
-                    let _ = std::fs::create_dir_all(&dir);
-                    Some(dir.join("server.log"))
-                }
-                Err(_) => None,
-            };
-
+            // 端口要在服务起之前定下来：窗口的 URL 就用它。
             let port = pick_port();
-            let mut child: Option<Child> = None;
-
-            if entry.exists() {
-                let mut cmd = Command::new(&node);
-                cmd.arg(&entry)
-                    .arg("-p")
-                    .arg(port.to_string())
-                    .arg("--no-open")
-                    .current_dir(&app_dir)
-                    .env("PI_WEB_NO_OPEN", "1")
-                    .env("PI_WEB_SKIP_VERSION_CHECK", "1")
-                    .env("PATH", child_path(&runtime))
-                    .stdin(Stdio::null());
-
-                match log_path.as_ref().and_then(|p| File::create(p).ok()) {
-                    Some(file) => {
-                        match file.try_clone() {
-                            Ok(clone) => cmd.stdout(Stdio::from(file)).stderr(Stdio::from(clone)),
-                            Err(_) => cmd.stdout(Stdio::from(file)).stderr(Stdio::null()),
-                        };
-                    }
-                    None => {
-                        cmd.stdout(Stdio::null()).stderr(Stdio::null());
-                    }
-                }
-
-                match cmd.spawn() {
-                    Ok(handle) => child = Some(handle),
-                    Err(err) => eprintln!("[pi-web-desktop] 拉起服务失败: {err}"),
-                }
-            } else {
-                eprintln!(
-                    "[pi-web-desktop] 找不到运行时入口: {}（app 包可能不完整）",
-                    entry.display()
-                );
+            let child = start_server(app.handle(), port);
+            if child.is_none() {
+                eprintln!("[pi-web-desktop] 服务没起来，窗口只显示启动页");
             }
-
             app.manage(ServerProcess(Mutex::new(child)));
 
             // 主窗口先建出来显示启动页，避免等服务时是一片空白。
